@@ -9,7 +9,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from git_into_gsoc.coach import hours_note, plan_actions, time_budget, upcoming_deadlines
+from git_into_gsoc.coach import (
+    GSOC_FAQ_URL,
+    LONGEST_CODING_WEEKS,
+    hours_note,
+    plan_actions,
+    time_budget,
+    upcoming_deadlines,
+)
 from git_into_gsoc.config import (
     DEFAULT_TARGET_YEAR,
     LATEST_ARCHIVED_YEAR,
@@ -53,6 +60,7 @@ from git_into_gsoc.github.prcheck import check_pull_request
 from git_into_gsoc.github.pulls import pull_request_status
 from git_into_gsoc.github.repos import (
     OUTSIDER_ROLES,
+    beginner_labels,
     channels_in,
     is_bot,
     mentioned_repos,
@@ -116,6 +124,16 @@ _MANIFESTS = ("package.json", "pyproject.toml", "setup.py", "Cargo.toml", "go.mo
 # Match reasons from an organization's own topic tags or category; a passing mention in
 # its description (LLVM mentions "embedded") is too weak to count as an interest match.
 _TOPIC_REASONS = ("Topic", "Related topic", "Category")
+# Beginner labels GSoC organizations use under other names ("Starter" at Learning
+# Unlimited), searched when --org names a few organizations.
+_COMMON_BEGINNER_LABELS = (
+    "good first issue",
+    "good-first-issue",
+    "starter",
+    "beginner",
+    "easy",
+    "first-timers-only",
+)
 
 
 # Where a newcomer should say hello, best first. A contact email reaches the
@@ -130,6 +148,33 @@ def public_channels(channels: list[ContactChannel]) -> list[str]:
         key=lambda c: _PUBLIC_CHANNEL_ORDER.index(c.kind),
     )
     return [c.value for c in ranked]
+
+
+def _mark_ideas_too_big(ideas: list[dict[str, Any]], hours_per_week: Any) -> str | None:
+    """Mark ideas bigger than the saved hours allow, move them last, and say so.
+
+    A beginner with 5 hours a week saw a 350-hour idea ranked as their best fit.
+    """
+    try:
+        hours = int(hours_per_week or 0)
+    except (TypeError, ValueError):
+        return None
+    if hours <= 0:
+        return None
+    capacity = hours * LONGEST_CODING_WEEKS
+    too_big = 0
+    for idea in ideas:
+        idea["too_big_for_your_hours"] = bool(idea.get("hours") and idea["hours"] > capacity)
+        too_big += idea["too_big_for_your_hours"]
+    if not too_big:
+        return None
+    ideas.sort(key=lambda idea: idea["too_big_for_your_hours"])  # stable: fit order kept
+    return (
+        f"At {hours} hours a week you have about {capacity} hours in the longest coding "
+        f"period ({LONGEST_CODING_WEEKS} weeks, only if your mentor agrees). {too_big} idea(s) "
+        "here need more than that and are listed last. Ask a mentor whether a smaller version "
+        f"would work. Source: {GSOC_FAQ_URL}"
+    )
 
 
 def _when_no_issues(language: str | None, *, org: str | None, repo: str | None) -> list[str]:
@@ -591,12 +636,21 @@ class GSoCToolkit:
         if from_profile:
             note += f" Using {language} from your saved profile; pass a language to change it."
         labels_used: list[str] = [label] if label else ["good first issue", "help wanted"]
+        if gsoc_owners and not label:
+            # A few named organizations: their own spellings fit in one query.
+            labels_used = [*_COMMON_BEGINNER_LABELS, "help wanted"]
         if repo and not label:
             owner_name, repo_name = parse_repo(repo)
-            own = pick_beginner_label(self.github.list_labels(owner_name, repo_name))
-            if own and own.lower() not in {x.lower() for x in labels_used}:
-                labels_used = [own, *labels_used]
-                note += f" Using this repository's own beginner label '{own}' first."
+            taken = {x.lower() for x in labels_used}
+            own = [
+                name
+                for name in beginner_labels(self.github.list_labels(owner_name, repo_name))
+                if name.lower() not in taken
+            ]
+            if own:
+                labels_used = [*own, *labels_used]
+                quoted = ", ".join(f"'{name}'" for name in own)
+                note += f" Using this repository's own beginner label(s) {quoted} first."
         issues = self.github.find_beginner_issues(
             language=language,
             org=org,
@@ -1407,7 +1461,9 @@ class GSoCToolkit:
             found = self.gsoc.get_organization(org)
             if found:
                 context["org"] = found.name
-                context["channels"] = public_channels(found.channels)
+                context["channels"], closed = self._open_channels(public_channels(found.channels))
+                if closed:
+                    context["closed_channels"] = closed
         if issue:
             owner, name, num = parse_issue_ref(issue)
             repo = repo or f"{owner}/{name}"
@@ -1462,6 +1518,8 @@ class GSoCToolkit:
                             )
                 except GigError:
                     pass
+            if kind in {"pr", "claim"}:
+                self._add_pr_rules(repo, context)
             guide = self.github.contribution_guide(repo)
             context["channels"] = context.get("channels") or guide.communication_channels
             text = guide.contributing_text or guide.contributing_excerpt
@@ -1469,7 +1527,9 @@ class GSoCToolkit:
             context["dco"] = bool(
                 re.search(r"Signed-off-by|git commit -s|Developer Certificate", text)
             )
-            context["ai_disclosure"] = bool(re.search(r"\bai\b.*disclos", text, re.I | re.S))
+            context["ai_disclosure"] = context.get("ai_disclosure") or bool(
+                re.search(r"\bai\b.*disclos", text, re.I | re.S)
+            )
             context["contributing_url"] = guide.contributing_url
         if kind == "status":
             latest = self.progress.recent_logs(limit=1)
@@ -1481,15 +1541,82 @@ class GSoCToolkit:
             for k, v in context.items()
             if k in {"org", "channels", "issue", "claim_convention", "contributing_url"}
         }
+        warnings: list[str] = []
         if context.get("issue", {}).get("availability") not in (None, "available"):
             issue_info = context["issue"]
-            draft["warning"] = (
-                f"Do not post a claim: {issue_info.get('reason')}."
-                if issue_info["availability"] == "not_open" and kind == "claim"
-                else f"Issue availability is {issue_info['availability']}; check the thread "
-                "before claiming."
+            if issue_info["availability"] == "not_open" and kind == "claim":
+                # Nothing to copy: a claim here would be turned down.
+                ref = f"{issue_info['repo']}#{issue_info['number']}"
+                draft["template"] = (
+                    f"Do not comment on {ref} to claim it.\n\n"
+                    f"Find another issue: git-into-gsoc issues --repo {issue_info['repo']}"
+                )
+                warnings.append(f"Do not post a claim: {issue_info.get('reason')}.")
+            else:
+                warnings.append(
+                    f"Issue availability is {issue_info['availability']}; check the thread "
+                    "before claiming."
+                )
+        for url in context.get("closed_channels") or []:
+            warnings.append(
+                f"The organization lists {url}, but GitHub Discussions are turned off there. "
+                "Look for the current channel in the project's README or CONTRIBUTING file."
             )
+        if warnings:
+            draft["warning"] = " ".join(warnings)
         return draft
+
+    def _add_pr_rules(self, repo: str, context: dict[str, Any]) -> None:
+        """The repository's own pull request template and workflow gates, into `context`.
+
+        learning-unlimited/ESP-Website's template asks for an AI disclosure, and a
+        workflow closes pull requests from anyone not assigned to the issue; the
+        generic draft said neither.
+        """
+        try:
+            owner, name = parse_repo(repo)
+            branch = str(self.github.get_repo(owner, name).get("default_branch") or "HEAD")
+            found = find_paths(list(self.github.git_tree(owner, name, branch).get("tree") or []))
+        except GigError:
+            return
+        template_path = found.get("pr_template")
+        gate_paths = rank_gate_workflows(found.get("workflows") or [], skip=[])
+        with ThreadPoolExecutor(max_workers=self.settings.max_concurrency) as pool:
+            template_f = (
+                pool.submit(self.github.get_raw_file, owner, name, template_path)
+                if template_path
+                else None
+            )
+            gate_f = {p: pool.submit(self.github.get_raw_file, owner, name, p) for p in gate_paths}
+            template = (template_f.result() if template_f else None) or ""
+            gate_texts = {p: f.result() or "" for p, f in gate_f.items()}
+        if template_path:
+            context["pr_template_path"] = template_path
+        if re.search(r"\bai\b.*disclos|disclos.*\bai\b", template, re.I | re.S):
+            context["ai_disclosure"] = True
+        gates = [g["gate"] for g in workflow_gates(gate_texts)]
+        context["gates"] = list(dict.fromkeys([*(context.get("gates") or []), *gates]))
+
+    def _open_channels(self, channels: list[str]) -> tuple[list[str], list[str]]:
+        """Split channels into usable ones and GitHub Discussions links that are turned off.
+
+        GSoC records go stale: Learning Unlimited's 2026 entry links Discussions on a
+        repository that has them disabled, so the link is a 404.
+        """
+        usable: list[str] = []
+        closed: list[str] = []
+        for url in channels:
+            match = _DISCUSSIONS_RE.search(url)
+            if match:
+                try:
+                    meta = self.github.get_repo(match.group(1), match.group(2))
+                except GigError:
+                    meta = {}
+                if meta and meta.get("has_discussions") is False:
+                    closed.append(url)
+                    continue
+            usable.append(url)
+        return usable, closed
 
     # ---------------------------------------------------------------- mentors
 
@@ -1578,6 +1705,8 @@ class GSoCToolkit:
             doc.layout = "headings"
         wanted = list(skills or []) or list(self.progress.profile().get("technologies") or [])
         ranked = rank_ideas(doc.ideas, skills=wanted or None, size=size, difficulty=difficulty)
+        idea_dicts = [i.model_dump(mode="json") for i in ranked]
+        hours_note = _mark_ideas_too_big(idea_dicts, self.progress.profile().get("hours_per_week"))
         proposals = proposal_folders(
             lambda owner, repo: list(self.github.git_tree(owner, repo, "HEAD").get("tree") or []),
             org.name,
@@ -1595,7 +1724,8 @@ class GSoCToolkit:
             "fetched_url": doc.fetched_url,
             "layout": doc.layout,
             "count": len(ranked),
-            "ideas": [i.model_dump(mode="json") for i in ranked[: max(1, limit)]],
+            "ideas": idea_dicts[: max(1, limit)],
+            "hours_note": hours_note,
             "skills_matched_on": wanted,
             "ai_policy": doc.ai_policy,
             "sub_pages": doc.sub_pages[:40] if doc.layout == "index" else [],
@@ -1801,7 +1931,9 @@ class GSoCToolkit:
         if not owners:
             return []
         found = self.gsoc_posts_for(list(owners), year=year)["posts"]
-        posts = [p for p in found if p["by_maintainer"]]
+        # A wiki statement has no author to check, but it only counts when it says
+        # the org will not take part or has not decided.
+        posts = [p for p in found if p["by_maintainer"] or p.get("source") == "wiki"]
         for post in posts:
             post["org"] = owners.get(post["repo"].split("/")[0].lower(), post["repo"])
         return posts[:5]
@@ -1891,6 +2023,7 @@ _GITHUB_PROJECT_RE = re.compile(
 )
 _NOT_OWNERS = {"orgs", "topics", "search", "features", "apps", "settings", "marketplace"}
 _NOT_REPOS = {"wiki", "issues", "blob", "tree", "pulls", "discussions", "projects"}
+_DISCUSSIONS_RE = re.compile(r"github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/discussions\b")
 _CHANGE_LINK_RE = re.compile(r"/(?:pull|pulls|commit|commits|compare)\b")
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,7 +11,7 @@ from urllib.parse import quote
 
 from git_into_gsoc.config import Settings, get_settings
 from git_into_gsoc.errors import InputError
-from git_into_gsoc.github.announcements import gsoc_posts, search_terms
+from git_into_gsoc.github.announcements import gsoc_posts, search_terms, wiki_post
 from git_into_gsoc.github.availability import MAINTAINER_ROLES, assess_issue, unverified_assessment
 from git_into_gsoc.github.ecosystems import fetch_commit_stats
 from git_into_gsoc.github.evidence import summarize_activity
@@ -241,7 +242,40 @@ class GitHubClient:
         if not logins:
             return []
         query = build_issue_query(base=search_terms(year), labels=[], orgs=logins)
-        return gsoc_posts(self.search_issues(query, per_page=30, sort="created"), year=year)
+        posts = gsoc_posts(self.search_issues(query, per_page=30, sort="created"), year=year)
+        return self._wiki_posts(logins[:2], year) + posts
+
+    def _wiki_posts(self, owners: list[str], year: int) -> list[dict[str, Any]]:
+        """Statements about `year` on the wiki home pages of each owner's two biggest repos."""
+        found: list[dict[str, Any]] = []
+        for owner in owners:
+            try:
+                repos = self.list_owner_repos(owner)
+            except HttpError:
+                continue
+            with_wiki = sorted(
+                (
+                    r
+                    for r in repos
+                    if r.get("has_wiki") and not r.get("archived") and not r.get("fork")
+                ),
+                key=lambda r: -int(r.get("stargazers_count") or 0),
+            )
+            for repo in with_wiki[:2]:
+                full = str(repo.get("full_name") or "")
+                if "/" not in full:
+                    continue
+                try:
+                    text = self.http.get_text(
+                        f"https://raw.githubusercontent.com/wiki/{full}/Home.md",
+                        ttl=self.settings.archive_ttl_seconds,
+                    )
+                except HttpError:
+                    continue  # no wiki pages, or the wiki is private
+                post = wiki_post(text, year=year, repo=full)
+                if post:
+                    found.append(post)
+        return found
 
     def get_issue(self, owner: str, repo: str, number: int) -> dict[str, Any]:
         owner, repo = parse_repo(f"{owner}/{repo}")
@@ -546,7 +580,8 @@ class GitHubClient:
         query = build_issue_query(base=base, labels=labels, orgs=list(dict.fromkeys(owners)))
         items: list[dict[str, Any]] = self.search_issues(query, per_page=min(100, wanted * 5))
         if labels[0] != "help wanted":
-            preferred = {labels[0].lower()}
+            # Beginner labels before "help wanted", which often marks larger work.
+            preferred = {lab.lower() for lab in labels if lab.lower() != "help wanted"}
             items.sort(
                 key=lambda i: (
                     not any(
@@ -606,7 +641,12 @@ class GitHubClient:
                 if timeline is None:
                     assessment = unverified_assessment()
                 else:
-                    assessment = assess_issue(issues_by_key.get(key, {}), timeline)
+                    owner_name, repo_name = key[0].split("/", 1)
+                    assessment = assess_issue(
+                        issues_by_key.get(key, {}),
+                        timeline,
+                        pull_lookup=self._pull_lookup(owner_name, repo_name),
+                    )
                 candidate.assessment = assessment
                 candidate.availability = assessment.availability
                 candidate.availability_reason = assessment.reason
@@ -626,7 +666,11 @@ class GitHubClient:
         timeline = self.get_issue_timeline(owner, repo, number)
         if timeline is None:
             return issue, unverified_assessment()
-        return issue, assess_issue(issue, timeline)
+        return issue, assess_issue(issue, timeline, pull_lookup=self._pull_lookup(owner, repo))
+
+    def _pull_lookup(self, owner: str, repo: str) -> Callable[[int], dict[str, Any] | None]:
+        """Fetch a pull request of this repository by number; None for an issue or an error."""
+        return lambda number: self.get_pull(owner, repo, number)
 
     def contribution_guide(self, full_name: str) -> ContributionGuide:
         owner, repo = parse_repo(full_name)
