@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from git_into_gsoc.config import DEFAULT_TARGET_YEAR, progress_path
 from git_into_gsoc.errors import InputError
-from git_into_gsoc.models import JourneyPhase, ProgressState
+from git_into_gsoc.models import JourneyPhase, LogEntry, ProgressState
 
 DEFAULT_PHASES = {phase.value: False for phase in JourneyPhase}
 
@@ -58,6 +59,37 @@ class ProgressStore:
         state.profile.update({k: v for k, v in fields.items() if v is not None})
         return self.save(state)
 
+    def profile(self) -> dict[str, Any]:
+        return dict(self.load().profile)
+
+    def set_issue_status(self, ref: str, status: str) -> ProgressState:
+        state = self.load()
+        state.issue_status[ref] = status
+        return self.save(state)
+
+    def mark_checked(self, statuses: dict[str, str], at: datetime) -> ProgressState:
+        state = self.load()
+        state.issue_status.update(statuses)
+        state.last_checked_at = at
+        return self.save(state)
+
+    def add_log(self, entry: LogEntry) -> ProgressState:
+        if entry.is_empty():
+            raise InputError(
+                "Nothing to save: the note is empty.",
+                hint="Give at least one of --goal, --done, --links, --learned, --stuck, --next.",
+            )
+        state = self.load()
+        state.weekly_log.append(entry)
+        return self.save(state)
+
+    def recent_logs(self, limit: int = 5) -> list[LogEntry]:
+        # Newest first; entries saved within the same clock tick keep insertion order,
+        # so the index breaks ties (Windows timestamps are coarse).
+        indexed = list(enumerate(self.load().weekly_log))
+        indexed.sort(key=lambda pair: (pair[1].at, pair[0]), reverse=True)
+        return [entry for _, entry in indexed][: max(1, limit)]
+
     def shortlist_org(self, name: str) -> ProgressState:
         name = _require(name, "organization name")
         state = self.load()
@@ -95,7 +127,10 @@ class ProgressStore:
         done = sum(1 for v in state.phases.values() if v)
         total = len(state.phases)
         next_phases = [k for k, v in state.phases.items() if not v]
+        last_log = max((e.at for e in state.weekly_log), default=None)
         return {
+            "log_entries": len(state.weekly_log),
+            "last_log_days_ago": (datetime.now(UTC) - last_log).days if last_log else None,
             "target_year": state.target_year,
             "completion": f"{done}/{total}",
             "percent": round(100.0 * done / total, 1) if total else 0.0,

@@ -9,6 +9,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
@@ -17,6 +18,7 @@ from typer.core import TyperGroup
 from git_into_gsoc import __version__
 from git_into_gsoc.errors import GigError, InputError
 from git_into_gsoc.guidance import ANTI_SPAM_RULES, journey_overview
+from git_into_gsoc.models import LogEntry
 from git_into_gsoc.service import GSoCToolkit
 from git_into_gsoc.validation import split_csv
 
@@ -292,6 +294,74 @@ def projects_cmd(
     console.print(table)
 
 
+@app.command("ideas")
+def ideas_cmd(
+    org: str = typer.Argument(..., help="GSoC organization name, full or partial"),
+    skills: str | None = typer.Option(
+        None, "--skills", "-s", help="Skills to match, comma-separated (default: your profile)"
+    ),
+    size: str | None = typer.Option(None, "--size", help="small, medium, or large"),
+    difficulty: str | None = typer.Option(None, "--difficulty", help="easy, medium, or hard"),
+    limit: int = typer.Option(20, "--limit", "-n", help="How many ideas to show"),
+    no_follow: bool = typer.Option(
+        False, "--no-follow", help="Do not open linked sub-project pages on umbrella orgs"
+    ),
+    output: Output = OUTPUT_OPTION,
+) -> None:
+    """Read an org's ideas page into a table: size, difficulty, mentors, skills, links."""
+    data = _toolkit().org_ideas(
+        org,
+        skills=split_csv(skills) or None,
+        size=size,
+        difficulty=difficulty,
+        limit=limit,
+        follow=not no_follow,
+    )
+    if output == Output.json or not data.get("found"):
+        _emit(data, Output.json)
+        return
+    lines = [f"[bold]{escape(data['org'])}[/bold]", f"Ideas page: {data['ideas_url']}"]
+    if data.get("fetched_url") and data["fetched_url"] != data["ideas_url"]:
+        lines.append(f"[dim]Read as: {data['fetched_url']}[/dim]")
+    lines.append(escape(data["note"]))
+    for sentence in data.get("ai_policy") or []:
+        lines.append(f"[yellow]AI policy:[/yellow] {escape(sentence)}")
+    console.print(Panel(Text.from_markup("\n".join(lines)), title=f"Ideas: {data['layout']}"))
+    if data["ideas"]:
+        table = Table(title="Project ideas", caption="? marks a block with no labelled fields")
+        table.add_column("Fit", justify="right")
+        table.add_column("Idea", overflow="fold")
+        table.add_column("Size", justify="right")
+        table.add_column("Level")
+        table.add_column("Mentors", overflow="fold", max_width=22)
+        table.add_column("Skills", overflow="fold", max_width=26)
+        for idea in data["ideas"]:
+            title = escape(idea["title"])
+            if idea.get("section"):
+                title = f"[dim]{escape(idea['section'])} /[/dim] {title}"
+            if idea["confidence"] == "low":
+                title = f"? {title}"
+            hours = f"{idea['hours']}h" if idea.get("hours") else (idea.get("size") or "")
+            table.add_row(
+                f"{idea['match_score']:.0f}" if idea["match_score"] else "",
+                title,
+                hours,
+                idea.get("difficulty") or "",
+                ", ".join(idea.get("mentors") or [])[:60],
+                ", ".join(idea.get("skills") or [])[:60],
+            )
+        console.print(table)
+        console.print(f"[dim]{escape(data['next_step'])}[/dim]")
+    if data.get("sub_pages") and not data["ideas"]:
+        console.print("[bold]Sub-project pages[/bold]")
+        for page in data["sub_pages"][:20]:
+            console.print(f"  {escape(page['title'])}: {page['url']}")
+    if data.get("headings"):
+        console.print(
+            "[bold]Page sections[/bold]: " + "; ".join(escape(h) for h in data["headings"][:15])
+        )
+
+
 @app.command("repos")
 def repos_cmd(
     org: str = typer.Argument(
@@ -363,6 +433,105 @@ def repo_cmd(
         console.print(f"  • Read first: {guide['contributing_url']}")
     if guide.get("communication_channels"):
         console.print(f"  • Channels mentioned: {', '.join(guide['communication_channels'])}")
+
+
+@app.command("orient")
+def orient_cmd(full_name: str, output: Output = OUTPUT_OPTION) -> None:
+    """Get your bearings in a repository: code map, entry points, test command, who merges, rules."""
+    data = _toolkit().orient_repo(full_name)
+    if output == Output.json:
+        _emit(data, output)
+        return
+    langs = ", ".join(f"{x['name']} {x['share']}%" for x in data["languages"]) or "unknown"
+    head = (data.get("as_of_commit") or "")[:10]
+    lines = [
+        f"[bold]{data['repo']}[/bold]  {escape(data.get('description') or '')}",
+        f"Languages: {langs}  |  License: {data.get('license') or 'none detected'}  |  "
+        f"Last push: {data.get('pushed_days_ago')}d ago",
+        f"[dim]As of commit {head} on {data['default_branch']}[/dim]",
+    ]
+    console.print(Panel(Text.from_markup("\n".join(lines)), title="Orientation"))
+
+    table = Table(title="Code map (purpose is a guess from the directory name)")
+    table.add_column("Directory")
+    table.add_column("Files", justify="right")
+    table.add_column("Mostly")
+    table.add_column("Purpose")
+    for row in data["code_map"]:
+        table.add_row(row["path"], str(row["files"]), row["main_extension"], row["purpose"])
+    console.print(table)
+
+    def section(title: str, items: list[str]) -> None:
+        if items:
+            console.print(f"\n[bold]{title}[/bold]")
+            for item in items:
+                console.print(f"  {item}")
+
+    section(
+        "Entry points",
+        [f"{p['path']}  [dim]{escape(p['reason'])}[/dim]" for p in data["entry_points"]],
+    )
+    section(
+        "How CI runs the tests",
+        [f"{escape(t['command'])}  [dim]({t['source']})[/dim]" for t in data["test_commands"]]
+        + [escape(h) for h in data["setup_hints"]],
+    )
+    docs = data["docs"]
+    section(
+        "Read first",
+        [
+            p
+            for p in (docs.get("readme"), docs.get("contributing"), *docs.get("architecture", []))
+            if p
+        ],
+    )
+    people = data["maintainers"]
+    section(
+        f"Who merges ({people['commits_90d']} commits in 90 days)",
+        [f"@{p['login']} ({p['commits']})" for p in people["active_committers_90d"]]
+        + [
+            f"CODEOWNERS {escape(c['pattern'])}: {escape(c['owners'])}"
+            for c in people["codeowners"][:5]
+        ],
+    )
+    rules = data["conventions"]
+    rule_lines = []
+    if rules["dco"]["required"]:
+        rule_lines.append(
+            "Sign-off required (git commit -s): " + "; ".join(rules["dco"]["evidence"])
+        )
+    if rules["cla"]["required"]:
+        rule_lines.append("CLA required: " + "; ".join(rules["cla"]["evidence"]))
+    if rules["conventional_commits"]["expected"]:
+        rule_lines.append(
+            "Commit style type(scope): subject expected: "
+            + "; ".join(rules["conventional_commits"]["evidence"])
+        )
+    if rules["pre_commit"]:
+        rule_lines.append("pre-commit hooks configured: run `pre-commit install` before committing")
+    if rules["pr_checklist_items"]:
+        rule_lines.append(
+            f"PR template has a {rules['pr_checklist_items']}-item checklist; fill it in"
+        )
+    if rules["ai_disclosure_in_pr_template"]:
+        rule_lines.append("PR template asks for an AI disclosure")
+    section("Before you open a PR", [escape(line) for line in rule_lines])
+    section(
+        "Policies, in the project's words",
+        [
+            f"[{q['kind']}] {escape(q['text'])}  [dim]({q['source']})[/dim]"
+            for q in data["policies"]
+        ],
+    )
+    section("Where to talk", [", ".join(data["channels"])] if data["channels"] else [])
+    section(
+        "Read in this order",
+        [
+            f"{i}. {escape(step['path'])}  [dim]{escape(step['why'])}[/dim]"
+            for i, step in enumerate(data["reading_plan"], 1)
+        ],
+    )
+    console.print(f"\n[dim]{escape(data['note'])}[/dim]")
 
 
 class Scope(StrEnum):
@@ -467,6 +636,160 @@ def issue_cmd(
         console.print(f"  ☐ {step}")
 
 
+@app.command("profile")
+def profile_cmd(
+    github: str | None = typer.Option(None, "--github", "-g", help="Your GitHub username"),
+    tech: str | None = typer.Option(
+        None, "--tech", "-t", help="Languages and tools you know, comma-separated"
+    ),
+    interests: str | None = typer.Option(
+        None, "--interests", "-i", help="Topics you care about, comma-separated"
+    ),
+    hours: int | None = typer.Option(None, "--hours", help="Hours per week you can give"),
+    tz: str | None = typer.Option(None, "--tz", help="Your timezone, for example Asia/Kolkata"),
+    output: Output = OUTPUT_OPTION,
+) -> None:
+    """Show or save your profile. recommend and next use it when you give no flags."""
+    toolkit = _toolkit()
+    if any([github, tech, interests, hours is not None, tz]):
+        data = toolkit.save_profile(
+            github=github,
+            technologies=split_csv(tech) or None,
+            interests=split_csv(interests) or None,
+            hours_per_week=hours,
+            timezone=tz,
+        )
+    else:
+        data = toolkit.progress.profile()
+    if output == Output.json:
+        _emit(data, output)
+        return
+    if not data:
+        console.print(
+            "No profile saved yet. Example:\n"
+            "  git-into-gsoc profile --github you --tech python --interests science --hours 10"
+        )
+        return
+    lines = []
+    for key, label in (
+        ("github", "GitHub"),
+        ("top_language", "Top language on GitHub"),
+        ("technologies", "Technologies"),
+        ("interests", "Interests"),
+        ("hours_per_week", "Hours per week"),
+        ("timezone", "Timezone"),
+    ):
+        value = data.get(key)
+        if value:
+            lines.append(f"{label}: {', '.join(value) if isinstance(value, list) else value}")
+    console.print(Panel(Text("\n".join(lines)), title="Your profile"))
+
+
+@app.command("pointers")
+def pointers_cmd(
+    ref: str = typer.Argument(..., help="owner/repo#123, an issue URL, or owner/repo"),
+    number: int | None = typer.Argument(None, help="Issue number if REF is owner/repo"),
+    similar: int = typer.Option(
+        5, "--similar", help="How many similar closed issues to learn from"
+    ),
+    no_search: bool = typer.Option(False, "--no-search", help="Skip GitHub code search"),
+    output: Output = OUTPUT_OPTION,
+) -> None:
+    """Where to start reading for an issue: files it names, past fixes of similar issues."""
+    data = _toolkit().issue_pointers(ref, number, similar=similar, code_search=not no_search)
+    if output == Output.json:
+        _emit(data, output)
+        return
+    issue = data["issue"]
+    console.print(
+        Panel(
+            Text.from_markup(
+                f"[bold]{escape(issue['title'])}[/bold]\n{issue['url']}\n"
+                f"[dim]As of commit {(data.get('as_of_commit') or '')[:10]}[/dim]"
+            ),
+            title=f"{issue['repo']}#{issue['number']}",
+        )
+    )
+    if data["files_likely_involved"]:
+        table = Table(title="Files the issue points at")
+        table.add_column("Confidence")
+        table.add_column("Path", overflow="fold")
+        table.add_column("Lines")
+        table.add_column("Because", overflow="fold")
+        for row in data["files_likely_involved"]:
+            table.add_row(
+                row["confidence"],
+                row["path"],
+                ", ".join(str(n) for n in row["lines"]),
+                "; ".join(escape(r) for r in row["reasons"][:3]),
+            )
+        console.print(table)
+    else:
+        console.print(
+            "[yellow]The issue text names no file this tool could match in the tree.[/yellow]"
+        )
+    if data["search_links"]:
+        console.print("\n[bold]Search these on GitHub[/bold]")
+        for link in data["search_links"]:
+            console.print(f"  {escape(link['identifier'])}: {link['url']}")
+    if data["code_search_note"]:
+        console.print(f"[dim]{escape(data['code_search_note'])}[/dim]")
+    if data["similar_fixes"]:
+        table = Table(title=f"How similar '{data['similar_label']}' issues were fixed here")
+        table.add_column("Issue", overflow="fold")
+        table.add_column("Fix PR")
+        table.add_column("Files", justify="right")
+        table.add_column("Days")
+        table.add_column("Touched", overflow="fold")
+        for fix in data["similar_fixes"]:
+            pr = fix["pull_request"]
+            table.add_row(
+                f"#{fix['issue']['number']} {escape(fix['issue']['title'][:50])}",
+                f"#{pr['number']} ({pr['confidence']})",
+                str(len(fix["files"])),
+                str(fix["days_to_merge"] if fix["days_to_merge"] is not None else ""),
+                ", ".join(escape(p) for p in fix["files"][:4]),
+            )
+        console.print(table)
+    if not data["similar_fixes"] and data.get("similar_note"):
+        console.print(f"[dim]{escape(data['similar_note'])}[/dim]")
+    norm = data["fix_norm"]
+    if norm.get("sample"):
+        console.print(
+            f"Fix norm here: median {norm['median_files']} file(s) per fix, "
+            f"{norm['touches_tests_pct']}% touch tests, {norm['touches_docs_pct']}% touch docs "
+            f"(from {norm['sample']} fixes)."
+        )
+    console.print(f"\n[dim]{escape(data['next_step'])}[/dim]")
+
+
+@app.command("draft")
+def draft_cmd(
+    kind: str = typer.Argument(
+        ..., help="intro, question, claim, pr, review-reply, status, or final"
+    ),
+    org: str | None = typer.Option(None, "--org", help="GSoC org name, for channels"),
+    repo: str | None = typer.Option(None, "--repo", help="owner/repo, for its claim and PR rules"),
+    issue: str | None = typer.Option(None, "--issue", help="owner/repo#N, for a claim or PR draft"),
+    output: Output = OUTPUT_OPTION,
+) -> None:
+    """A skeleton for an intro, question, claim comment, PR description, review reply, or report."""
+    data = _toolkit().draft(kind, org=org, repo=repo, issue=issue)
+    if output == Output.json:
+        _emit(data, output)
+        return
+    console.print(Panel(Text(data["template"]), title=f"Draft: {data['kind']}"))
+    if data.get("warning"):
+        console.print(f"[yellow]![/yellow] {escape(data['warning'])}")
+    console.print("[bold]Fill these with real observations before sending[/bold]")
+    for field in data["must_fill"]:
+        console.print(f"  ☐ {escape(field)}")
+    console.print("\n[bold]Rules, with sources[/bold]")
+    for rule in data["rules"]:
+        console.print(f"  • {escape(rule['rule'])}\n    [dim]{rule['source']}[/dim]")
+    console.print(f"\n[dim]{escape(data['note'])}[/dim]")
+
+
 @app.command("recommend")
 def recommend_cmd(
     github: str | None = typer.Option(
@@ -480,11 +803,11 @@ def recommend_cmd(
     ),
     output: Output = OUTPUT_OPTION,
 ) -> None:
-    """Suggest organizations and starter issues based on your skills."""
-    techs = [x.strip() for x in (tech or "").split(",") if x.strip()]
-    ints = [x.strip() for x in (interests or "").split(",") if x.strip()]
+    """Suggest organizations and starter issues from your saved profile or flags."""
     data = _toolkit().recommend_path(
-        username=github, technologies=techs or None, interests=ints or None
+        username=github,
+        technologies=split_csv(tech) or None,
+        interests=split_csv(interests) or None,
     )
     if output == Output.json:
         _emit(data, output)
@@ -495,15 +818,78 @@ def recommend_cmd(
             f"Profile: [bold]{data['profile'].get('login')}[/bold] "
             f"top={data['profile'].get('top_language')}"
         )
-    console.print("\n[bold]Orgs[/bold]")
-    for org in data["recommended_orgs"][:5]:
-        console.print(f"  • {org['name']} (score {org['match_score']:.0f})")
+    used = ", ".join(data["technologies_used"] + data["interests_used"]) or "none"
+    console.print(f"Matching on: {escape(used)} ({data['profile_source']})")
+    table = Table(title="Organizations")
+    table.add_column("Score", justify="right")
+    table.add_column("Organization", overflow="fold", max_width=28)
+    table.add_column("Fit", overflow="fold")
+    for org in data["recommended_orgs"][:8]:
+        fit = [r for r in org.get("match_reasons") or [] if r.startswith(_FIT_PREFIXES)]
+        table.add_row(f"{org['match_score']:.0f}", org["name"], "; ".join(fit))
+    console.print(table)
+    if data["starter_issues"]:
+        issues = Table(title="Starter issues (verified availability)")
+        issues.add_column("Status")
+        issues.add_column("Issue", overflow="fold")
+        issues.add_column("Title", overflow="fold")
+        for issue in data["starter_issues"]:
+            status = issue["availability"]
+            issues.add_row(
+                f"[{_STATUS_STYLE.get(status, '')}]{status}[/]",
+                f"{issue['repo']}#{issue['number']}",
+                escape(issue["title"]),
+            )
+        console.print(issues)
+    elif data.get("starter_issue_error"):
+        console.print(
+            f"[yellow]Starter issues unavailable:[/yellow] {data['starter_issue_error']['error']}"
+        )
     console.print("\n[bold]Next steps[/bold]")
     for step in data["next_steps"]:
         console.print(f"  → {step}")
 
 
 _FINDING_MARK = {"pass": "[green]✓[/green]", "warn": "[yellow]![/yellow]", "fail": "[red]✗[/red]"}
+_STRENGTH_STYLE = {"strong": "green", "developing": "cyan", "starting": "yellow", "none": "red"}
+
+
+@app.command("contributions")
+def contributions_cmd(
+    github: str = typer.Option(..., "--github", "-g", help="Your GitHub username"),
+    org: str | None = typer.Option(None, "--org", help="GSoC org name or GitHub org"),
+    repo: str | None = typer.Option(None, "--repo", help="owner/repo to scope to"),
+    output: Output = OUTPUT_OPTION,
+) -> None:
+    """Collect your PRs, issues, and reviews in an org's repos as proposal evidence."""
+    if not org and not repo:
+        raise typer.BadParameter("Pass --org or --repo")
+    data = _toolkit().contribution_evidence(github, org=org, repo=repo)
+    if output == Output.json:
+        _emit(data, output)
+        return
+    counts = data["counts"]
+    scope = data["scope"]
+    where = scope["repo"] or ", ".join(scope["github_owners"]) or scope["org"]
+    style = _STRENGTH_STYLE.get(data["strength"], "")
+    console.print(
+        Panel.fit(
+            f"[bold]@{data['username']}[/bold] in {where}\n"
+            f"Standing: [{style}]{data['strength']}[/]\n"
+            f"PRs merged {counts['prs_merged']} · open {counts['prs_open']} · "
+            f"closed {counts['prs_closed_unmerged']} · issues {counts['issues_opened']} · "
+            f"threads joined {counts['threads_joined']} · reviews {counts['reviews_given']}",
+            title="Contribution evidence",
+        )
+    )
+    if data["evidence_markdown"]:
+        console.print("\n[bold]Paste into your proposal[/bold]")
+        for line in data["evidence_markdown"]:
+            console.print(f"  {escape(line)}")
+    if data["gaps"]:
+        console.print("\n[bold]Gaps to close[/bold]")
+        for gap in data["gaps"]:
+            console.print(f"  [yellow]![/yellow] {escape(gap)}")
 
 
 @app.command("proposal")
@@ -613,6 +999,115 @@ def journey_cmd(output: Output = OUTPUT_OPTION) -> None:
         console.print(f"\n[bold cyan]{phase}[/bold cyan]: {guide['goal']}")
         for action in guide["actions"]:
             console.print(f"  • {action}")
+
+
+@app.command("next")
+def next_cmd(
+    year: int | None = typer.Option(None, help="Program year (default: the target year)"),
+    no_check: bool = typer.Option(
+        False, "--no-check", help="Skip live re-checks of tracked issues and new-issue search"
+    ),
+    output: Output = OUTPUT_OPTION,
+) -> None:
+    """What should I do right now? Phase, deadlines, tracked-issue changes, new issues, actions."""
+    data = _toolkit().next_steps(year=year, recheck=not no_check)
+    if output == Output.json:
+        _emit(data, output)
+        return
+    program = data["program"]
+    badge = (
+        "[green]official[/green]" if program["dates_are_official"] else "[yellow]estimate[/yellow]"
+    )
+    phase = program["phase"]
+    console.print(
+        Panel.fit(
+            f"[bold]GSoC {program['year']}[/bold]  dates: {badge}\n"
+            f"[bold cyan]Now:[/bold cyan] {phase['title']}\n{phase['advice']}",
+            title="Where you are",
+        )
+    )
+    if data["deadlines"]:
+        console.print("\n[bold]Coming up[/bold]")
+        for item in data["deadlines"]:
+            mark = "" if item["official"] else " (estimate)"
+            console.print(
+                f"  {item['at'][:10]}  {item['label']}{mark}  {_relative(item['days_until'])}"
+            )
+    if data["changes"]:
+        console.print("\n[bold]Changed since your last check[/bold]")
+        for change in data["changes"]:
+            console.print(f"  [yellow]![/yellow] {escape(change)}")
+    if data["tracked_issues"]:
+        console.print("\n[bold]Tracked issues[/bold]")
+        for item in data["tracked_issues"]:
+            style = _STATUS_STYLE.get(item["availability"], "")
+            console.print(
+                f"  [{style}]{item['availability']:<12}[/] {item['ref']}  [dim]{escape(item['reason'])}[/dim]"
+            )
+    if data["new_issues"]:
+        console.print("\n[bold]New beginner issues in places you follow[/bold]")
+        for issue in data["new_issues"][:5]:
+            console.print(f"  {issue['repo']}#{issue['number']}  {escape(issue['title'])}")
+    console.print("\n[bold]Do next[/bold]")
+    for index, action in enumerate(data["actions"], 1):
+        console.print(f"  {index}. {escape(action['title'])}")
+        console.print(f"     [cyan]{escape(action['command'])}[/cyan]")
+        console.print(f"     [dim]{escape(action['why'])}[/dim]")
+    console.print(f"\n[dim]{data['note']}[/dim]")
+
+
+@app.command("log")
+def log_cmd(
+    goal: str | None = typer.Option(None, "--goal", help="This week's goal"),
+    done: str | None = typer.Option(None, "--done", help="What you tried or finished"),
+    links: str | None = typer.Option(None, "--links", help="Links to work, comma-separated"),
+    learned: str | None = typer.Option(None, "--learned", help="What you learned"),
+    stuck: str | None = typer.Option(None, "--stuck", help="Where you are stuck"),
+    next_step: str | None = typer.Option(None, "--next", help="Your next small step"),
+    limit: int = typer.Option(5, "--limit", "-n", help="How many past notes to show"),
+    output: Output = OUTPUT_OPTION,
+) -> None:
+    """Write a weekly note, or show recent ones when you give no fields."""
+    store = _toolkit().progress
+    if any([goal, done, links, learned, stuck, next_step]):
+        entry = LogEntry(
+            goal=(goal or "").strip(),
+            done=(done or "").strip(),
+            links=split_csv(links),
+            learned=(learned or "").strip(),
+            stuck=(stuck or "").strip(),
+            next_step=(next_step or "").strip(),
+        )
+        store.add_log(entry)
+        entries = [entry]
+        title = "Saved this note"
+    else:
+        entries = store.recent_logs(limit=limit)
+        title = f"Last {len(entries)} note(s)"
+    if output == Output.json:
+        _emit([e.model_dump(mode="json") for e in entries], output)
+        return
+    if not entries:
+        console.print(
+            "No notes yet. Example:\n"
+            '  git-into-gsoc log --goal "Reproduce issue 12" --done "Reproduced on main" '
+            '--stuck "Flaky test" --next "Ask in the project chat"'
+        )
+        return
+    console.print(f"[bold]{title}[/bold]")
+    for entry in entries:
+        lines = []
+        for label, value in (
+            ("Goal", entry.goal),
+            ("Done", entry.done),
+            ("Links", ", ".join(entry.links)),
+            ("Learned", entry.learned),
+            ("Stuck", entry.stuck),
+            ("Next", entry.next_step),
+        ):
+            if value:
+                lines.append(f"{label}: {escape(value)}")
+        console.print(Panel(Text.from_markup("\n".join(lines)), title=f"{entry.at:%Y-%m-%d}"))
 
 
 @app.command("mcp")

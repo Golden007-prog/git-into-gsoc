@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -155,6 +155,22 @@ class IssueCandidate(BaseModel):
     signals: list[str] = Field(default_factory=list)
 
 
+class ContributionItem(BaseModel):
+    """One PR, issue, thread, or review a contributor took part in."""
+
+    kind: str  # pr | issue | discussion | review
+    repo: str
+    number: int
+    title: str
+    url: str
+    state: str  # open | closed | merged
+    author: str | None = None
+    created_at: datetime | None = None
+    closed_at: datetime | None = None
+    comments: int = 0
+    labels: list[str] = Field(default_factory=list)
+
+
 class ContributionGuide(BaseModel):
     repo: str
     contributing_url: str | None = None
@@ -180,12 +196,59 @@ class RepoLead(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class ProjectIdea(BaseModel):
+    """One project idea parsed from an org's ideas page. Empty fields were not on the page."""
+
+    title: str
+    section: str | None = None
+    description: str = ""
+    difficulty: str | None = None  # easy | medium | hard
+    difficulty_raw: str = ""
+    size: str | None = None  # small | medium | large
+    hours: int | None = None
+    size_raw: str = ""
+    mentors: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    expected_outcome: str = ""
+    links: list[str] = Field(default_factory=list)
+    confidence: str = "low"  # high | medium | low
+    labelled_fields: int = 0
+    source_url: str = ""
+    match_score: float = 0.0
+    match_reasons: list[str] = Field(default_factory=list)
+
+
+class IdeasDocument(BaseModel):
+    source_url: str
+    fetched_url: str
+    layout: str = "unstructured"  # headings | index | unstructured | issues
+    ideas: list[ProjectIdea] = Field(default_factory=list)
+    sub_pages: list[dict[str, str]] = Field(default_factory=list)
+    headings: list[str] = Field(default_factory=list)
+    ai_policy: list[str] = Field(default_factory=list)
+
+
 class ProposalChecklistItem(BaseModel):
     id: str
     title: str
     description: str
     required: bool = True
     done: bool = False
+
+
+class LogEntry(BaseModel):
+    """One weekly note: the structure mentors expect in progress updates."""
+
+    at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    goal: str = ""
+    done: str = ""
+    links: list[str] = Field(default_factory=list)
+    learned: str = ""
+    stuck: str = ""
+    next_step: str = ""
+
+    def is_empty(self) -> bool:
+        return not any([self.goal, self.done, self.links, self.learned, self.stuck, self.next_step])
 
 
 class ProgressState(BaseModel):
@@ -198,6 +261,9 @@ class ProgressState(BaseModel):
     tracked_issues: list[str] = Field(default_factory=list)
     contributions: list[dict[str, Any]] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    issue_status: dict[str, str] = Field(default_factory=dict)
+    last_checked_at: datetime | None = None
+    weekly_log: list[LogEntry] = Field(default_factory=list)
     updated_at: datetime | None = None
 
 
