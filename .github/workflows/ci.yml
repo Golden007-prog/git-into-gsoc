@@ -48,18 +48,19 @@ jobs:
 
   test:
     # Job names are required status checks in the main branch ruleset; keep
-    # "Test (Python 3.11)" and "Test (Python 3.13)" stable when editing.
+    # them stable when editing (tests/unit/test_workflows.py lists them).
     name: Test (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     needs: quality
     strategy:
       fail-fast: false
       matrix:
-        # Oldest and newest supported Python on Linux; one current Python on
-        # macOS and Windows because install paths and config files differ.
+        # Every supported Python on Linux except 3.12, which macOS and Windows
+        # cover because install paths and config files differ there.
         include:
           - { os: ubuntu-latest, python-version: "3.11", label: "Python 3.11" }
           - { os: ubuntu-latest, python-version: "3.13", label: "Python 3.13" }
+          - { os: ubuntu-latest, python-version: "3.14", label: "Python 3.14" }
           - { os: macos-latest, python-version: "3.12", label: "macOS, Python 3.12" }
           - { os: windows-latest, python-version: "3.12", label: "Windows, Python 3.12" }
     steps:
