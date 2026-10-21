@@ -10,6 +10,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from git_into_gsoc.scoring.org_match import canonical
+
 KNOWN_BOTS = {
     "dependabot",
     "renovate",
@@ -62,7 +64,15 @@ TOOLCHAIN_FILES: dict[str, str] = {
     "pubspec.yaml": "Dart/Flutter",
     "DESCRIPTION": "R package",
     "Project.toml": "Julia project",
+    "wscript": "waf build (./waf)",
+    "SConstruct": "SCons build",
+    "MODULE.bazel": "Bazel build",
+    "WORKSPACE": "Bazel build",
+    "configure.ac": "Autotools (./configure)",
 }
+# Files that say how to build before anything else does.
+_BUILD_DOCS = ("BUILD.md", "BUILDING.md", "INSTALL.md", "docs/BUILD.md")
+_PYTHON_FILES = {"pyproject.toml", "setup.py", "requirements.txt"}
 
 
 def is_bot(user: dict[str, Any] | None) -> bool:
@@ -323,10 +333,24 @@ _BEGINNER_WORDS = re.compile(
 )
 
 
-def detect_toolchain(entries: list[dict[str, Any]]) -> tuple[list[str], bool]:
-    """Toolchain hints from a repo root listing, plus whether a dev container exists."""
+def detect_toolchain(
+    entries: list[dict[str, Any]], *, language: str | None = None
+) -> tuple[list[str], bool]:
+    """Toolchain hints from a repo root listing, plus whether a dev container exists.
+
+    A C++ project with a pyproject.toml for its scripts is not a Python project, so
+    Python files are labelled as tooling when the main language is something else.
+    """
     names = {str(e.get("name")) for e in entries}
-    hints = [label for name, label in TOOLCHAIN_FILES.items() if name in names]
+    tooling_only = bool(language) and str(language).lower() not in {"python", "jupyter notebook"}
+    hints = [f"Build instructions in {doc}" for doc in _BUILD_DOCS if doc in names]
+    for name, label in TOOLCHAIN_FILES.items():
+        if name not in names:
+            continue
+        if tooling_only and name in _PYTHON_FILES:
+            label = f"Python tooling ({name})"
+        if label not in hints:
+            hints.append(label)
     return hints, ".devcontainer" in names or ".devcontainer.json" in names
 
 
@@ -389,7 +413,7 @@ def repo_lead_score(
             reasons.append(f"Pushed {days}d ago")
     stars = int(repo.get("stargazers_count") or 0)
     score += min(12.0, 1.5 * math.log2(1 + stars))
-    if language and str(repo.get("language") or "").lower() == language.lower():
+    if language and canonical(str(repo.get("language") or "")) == canonical(language):
         score += 10
         reasons.append(f"Written in {repo.get('language')}")
     return round(score, 1), reasons
