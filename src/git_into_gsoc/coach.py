@@ -67,10 +67,11 @@ def hours_note(hours_per_week: Any) -> str | None:
             f"Source: {GSOC_FAQ_URL}"
         )
     sizes = " and ".join(too_long)
+    fits = " or ".join(size for size in PROJECT_HOURS if size not in too_long)
     return (
         f"At {hours} hours a week, a small project (about 90 hours) takes about {small} "
         f"weeks, and {sizes} projects would not fit in the longest coding period "
-        f"({LONGEST_CODING_WEEKS} weeks, and only if your mentor agrees). Choose a small "
+        f"({LONGEST_CODING_WEEKS} weeks, and only if your mentor agrees). Choose a {fits} "
         f"idea and state your hours in the proposal. Source: {GSOC_FAQ_URL}"
     )
 
@@ -150,8 +151,14 @@ def plan_actions(
     new_issues: list[dict[str, Any]],
     open_pull_requests: list[dict[str, Any]] | None = None,
     now: datetime | None = None,
+    code_elsewhere: dict[str, str] | None = None,
 ) -> list[dict[str, str]]:
-    """A short, ordered ladder of concrete next actions."""
+    """A short, ordered ladder of concrete next actions.
+
+    `code_elsewhere` maps shortlisted organizations with no GitHub owner to where
+    their code lives, so the repository and issue steps do not send someone to a
+    GitHub-only command that cannot help.
+    """
     now = now or datetime.now(UTC)
     profile = state.profile or {}
     github = str(profile.get("github") or "").strip()
@@ -228,11 +235,19 @@ def plan_actions(
         )
     elif not repos:
         first = orgs[0]
+        elsewhere = (code_elsewhere or {}).get(first)
+        why = "Mentors work in a few repos; the ideas page and beginner issues show which."
+        if elsewhere:
+            why = (
+                f"{first} lists no GitHub organization. If repos says its code is elsewhere "
+                f"({elsewhere}), pick the project an idea names there and save its link: "
+                "git-into-gsoc progress track_repo --value LINK"
+            )
         actions.append(
             _action(
                 f"Pick the repository to start in at {first}",
                 f'git-into-gsoc repos "{first}"   # then: git-into-gsoc repo owner/name',
-                "Mentors work in a few repos; the ideas page and beginner issues show which.",
+                why,
             )
         )
     elif not state.phases.get("community") and not tracked_issues:
@@ -247,16 +262,38 @@ def plan_actions(
         )
     elif not tracked_issues:
         repo = repos[0]
-        actions.append(
-            _action(
-                f"Find a beginner issue that is actually free in {repo}",
-                f"git-into-gsoc issues --repo {repo} -n 5",
-                "Only issues with no assignee, open PR, or recent claim are worth your time.",
+        if repo.startswith("http"):
+            actions.append(
+                _action(
+                    f"Find a newcomer issue in {repo}",
+                    "git-into-gsoc progress track_issue --value LINK   # once you pick one",
+                    "This tool cannot search issues outside GitHub. Open the project's issue "
+                    "list, filter by its newcomer label, and skip any with an assignee, a "
+                    "linked merge request, or a recent claim.",
+                )
             )
-        )
+        else:
+            actions.append(
+                _action(
+                    f"Find a beginner issue that is actually free in {repo}",
+                    f"git-into-gsoc issues --repo {repo} -n 5",
+                    "Only issues with no assignee, open PR, or recent claim are worth your time.",
+                )
+            )
     else:
         free = [t for t in tracked_issues if t.get("availability") == "available"]
-        if free:
+        elsewhere_issues = [t for t in tracked_issues if t.get("off_github")]
+        if not free and elsewhere_issues:
+            link = elsewhere_issues[0]["url"]
+            actions.append(
+                _action(
+                    "Check the issue you saved, then reproduce it and comment with a short plan",
+                    link,
+                    "It is not on GitHub, so this tool cannot check it: make sure nobody is "
+                    "assigned or has a merge request open first.",
+                )
+            )
+        elif free:
             ref = free[0]["ref"]
             actions.append(
                 _action(

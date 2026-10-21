@@ -752,7 +752,11 @@ def ideas_cmd(
                 title = f"[dim]{escape(idea['section'])} /[/dim] {title}"
             if idea["confidence"] == "low":
                 title = f"? {title}"
-            hours = f"{idea['hours']}h" if idea.get("hours") else (idea.get("size") or "")
+            hours = (
+                f"{idea['hours']}h"
+                if idea.get("hours")
+                else (idea.get("size") or (idea.get("size_raw") or "")[:16])
+            )
             if idea.get("too_big_for_your_hours"):
                 hours = f"[yellow]{hours} too big[/yellow]"
             table.add_row(
@@ -880,12 +884,15 @@ def repo_cmd(
     """Check whether a newcomer's pull request can land here: grade, merge history, setup hints."""
     data = _toolkit().evaluate_repo(full_name)
     if track:
-        _toolkit().progress.track_repo(data["health"]["full_name"])
+        _toolkit().progress.track_repo((data["health"] or data)["full_name"])
         data["tracked"] = True
     if output == Output.json:
         _emit(data, output)
         return
     data = _markup_safe(data)
+    if data.get("mirror_of"):
+        console.print(Panel.fit(data["recommendation"], title=f"{data['full_name']}: a mirror"))
+        return
     health = data["health"]
     guide = data["contribution_guide"]
     console.print(

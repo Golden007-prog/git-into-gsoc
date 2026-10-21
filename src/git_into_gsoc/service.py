@@ -7,7 +7,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from git_into_gsoc.coach import (
     GSOC_FAQ_URL,
@@ -64,6 +64,7 @@ from git_into_gsoc.github.repos import (
     channels_in,
     is_bot,
     mentioned_repos,
+    mirror_source,
     pick_beginner_label,
     repo_lead_score,
 )
@@ -84,11 +85,12 @@ from git_into_gsoc.models import (
     Availability,
     ContactChannel,
     IdeasDocument,
+    OrgSummary,
     ProgressState,
     ProjectIdea,
     RepoLead,
 )
-from git_into_gsoc.progress.store import ProgressStore
+from git_into_gsoc.progress.store import ProgressStore, other_host_link
 from git_into_gsoc.scoring.org_match import canonical
 from git_into_gsoc.text import clean_untrusted
 from git_into_gsoc.validation import (
@@ -175,6 +177,20 @@ def _mark_ideas_too_big(ideas: list[dict[str, Any]], hours_per_week: Any) -> str
         "here need more than that and are listed last. Ask a mentor whether a smaller version "
         f"would work. Source: {GSOC_FAQ_URL}"
     )
+
+
+def _off_github_issue(link: str) -> dict[str, Any]:
+    """A tracked issue on another code host: listed, but never re-checked."""
+    return {
+        "ref": link,
+        "url": link,
+        "availability": "unknown",
+        "reason": "Not on GitHub, so it is not re-checked: look for an assignee, a linked "
+        "merge request, and recent claims yourself",
+        "previous": None,
+        "changed": False,
+        "off_github": True,
+    }
 
 
 def _when_no_issues(language: str | None, *, org: str | None, repo: str | None) -> list[str]:
@@ -396,6 +412,20 @@ class GSoCToolkit:
         }
 
     def evaluate_repo(self, full_name: str) -> dict[str, Any]:
+        owner, name = parse_repo(full_name)
+        source = mirror_source(self.github.get_repo(owner, name))
+        if source:
+            # The mirror's pull requests and issues say nothing about the project.
+            return {
+                "full_name": f"{owner}/{name}",
+                "mirror_of": source,
+                "health": None,
+                "recommendation": (
+                    f"Not graded: {owner}/{name} is a read-only mirror of {source}. Its "
+                    "GitHub history does not show how the project treats newcomers. Judge "
+                    "the project, and contribute, where its code really lives."
+                ),
+            }
         health = self.github.repo_health(full_name)
         guide = self.github.contribution_guide(full_name)
         return {
@@ -571,8 +601,10 @@ class GSoCToolkit:
             gsoc_org = self.gsoc.get_organization(name)
         except GigError:
             return [], [], ""
-        if gsoc_org is None or not gsoc_org.github_orgs:
+        if gsoc_org is None:
             return [], [], ""
+        if not gsoc_org.github_orgs:
+            return self._owners_off_github(gsoc_org, language=language)
         owners = list(gsoc_org.github_orgs[:3])
         ideas = fetch_ideas_text(self.http, gsoc_org.ideas_url, self.settings.archive_ttl_seconds)
         linked: list[str] = []
@@ -584,6 +616,37 @@ class GSoCToolkit:
         if linked:
             note += f", and {', '.join(linked[:4])} (named on its ideas page)"
         return owners, linked[:4], note + "."
+
+    def _owners_off_github(
+        self, gsoc_org: OrgSummary, *, language: str | None
+    ) -> tuple[list[str], list[str], str]:
+        """For an org with no GitHub owner: the GitHub projects its ideas page names.
+
+        An umbrella such as the Python Software Foundation lists member projects on
+        GitHub. An org whose code lives elsewhere (GNOME on gitlab.gnome.org, KDE on
+        invent.kde.org) gets a clear error naming that place, instead of being read
+        as a mistyped GitHub login.
+        """
+        ideas = fetch_ideas_text(self.http, gsoc_org.ideas_url, self.settings.archive_ttl_seconds)
+        linked: list[str] = []
+        for lead in self._repos_named_on_page(ideas or "", [], language=language):
+            owner = lead.full_name.split("/", 1)[0]
+            if owner.lower() not in {o.lower() for o in linked}:
+                linked.append(owner)
+        if linked:
+            note = (
+                f"Searching {gsoc_org.name}: it lists no GitHub organization, so the GitHub "
+                f"projects its ideas page names: {', '.join(linked[:4])}."
+            )
+            return [], linked[:4], note
+        where = gsoc_org.source_code or gsoc_org.url or "its own site"
+        raise NotFoundError(
+            f"{gsoc_org.name} keeps its code outside GitHub ({where}), so this tool cannot "
+            "search its issues",
+            hint=f"Open {where} and look for a newcomer or beginner label, and read the ideas "
+            f"page ({gsoc_org.ideas_url or 'not listed'}). org, ideas, mentors, projects, and "
+            "proposal still work for this organization.",
+        )
 
     def _repos_named_on_page(
         self, text: str, searched: list[str], *, language: str | None, limit: int = 6
@@ -615,8 +678,8 @@ class GSoCToolkit:
                 continue
             if (raw.get("owner") or {}).get("type") != "Organization":
                 continue
-            if raw.get("archived") or raw.get("fork"):
-                continue
+            if raw.get("archived") or raw.get("fork") or mirror_source(raw):
+                continue  # a mirror's issues and pull requests live elsewhere
             score, reasons = repo_lead_score(
                 raw, beginner_issues=0, ideas_mention=True, language=language
             )
@@ -980,13 +1043,25 @@ class GSoCToolkit:
             owner, name = repo.split("/", 1)
             return self.github.get_pull(owner, name, number)
 
+        def mr_lookup(host: str, path: str, iid: int) -> dict[str, Any] | None:
+            # Public GitLab instances answer this without a token. The HTTP client
+            # refuses local and private addresses, so a link cannot reach them.
+            url = f"https://{host}/api/v4/projects/{quote(path, safe='')}/merge_requests/{iid}"
+            try:
+                data = self.http.get_json(url, ttl=900)
+            except GigError:
+                return None
+            return data if isinstance(data, dict) else None
+
         report = check_proposal(
             text,
             github_user=github,
             lookup=lookup if verify else None,
             ideas_text=ideas_text,
+            mr_lookup=mr_lookup if verify else None,
         )
-        report["links_verified"] = verify
+        # True only when at least one link was actually checked against its host.
+        report["links_verified"] = any(link["verified"] for link in report["links"])
         report["checklist"] = [i.model_dump() for i in proposal_checklist()]
         return report
 
@@ -1042,6 +1117,8 @@ class GSoCToolkit:
                 try:
                     owner, repo, num = parse_issue_ref(raw)
                 except GigError:
+                    if other_host_link(raw):
+                        tracked.append(_off_github_issue(raw))
                     continue
                 refs.append((raw, f"{owner}/{repo}", f"{owner}/{repo}#{num}", num))
             with ThreadPoolExecutor(max_workers=self.settings.max_concurrency) as pool:
@@ -1091,6 +1168,7 @@ class GSoCToolkit:
             new_issues=new_issues,
             open_pull_requests=open_prs,
             now=now,
+            code_elsewhere=self._code_elsewhere(state.shortlisted_orgs[:3]),
         )
         for post in reversed([p for p in org_posts if p["status"] == "not_taking_part"]):
             actions.insert(
@@ -1518,6 +1596,10 @@ class GSoCToolkit:
             found = self.gsoc.get_organization(org)
             if found:
                 context["org"] = found.name
+                if not found.github_orgs and found.source_code:
+                    # "GitLab: <handle>" for GNOME, not a GitHub handle it never uses.
+                    host = urlparse(found.source_code).netloc.removeprefix("www.")
+                    context["code_host"] = "GitLab" if "gitlab" in host else host or None
                 context["channels"], closed = self._open_channels(public_channels(found.channels))
                 if closed:
                     context["closed_channels"] = closed
@@ -1972,6 +2054,18 @@ class GSoCToolkit:
         with ThreadPoolExecutor(max_workers=self.settings.max_concurrency) as pool:
             found = [r for r in pool.map(one, items[:limit]) if r]
         found.sort(key=lambda r: (r["status"] != "needs_you", -(r.get("quiet_days") or 0)))
+        return found
+
+    def _code_elsewhere(self, names: list[str]) -> dict[str, str]:
+        """Shortlisted organizations with no GitHub owner, and where their code is."""
+        found: dict[str, str] = {}
+        for name in names:
+            try:
+                org = self.gsoc.get_organization(name)
+            except GigError:
+                continue
+            if org and not org.github_orgs:
+                found[name] = org.source_code or org.url or "its own site"
         return found
 
     def _shortlist_posts(self, state: ProgressState, year: int) -> list[dict[str, Any]]:
