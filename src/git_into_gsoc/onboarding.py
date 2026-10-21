@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from git_into_gsoc.errors import GigError, HttpError
+from git_into_gsoc.errors import GigError
 from git_into_gsoc.validation import split_csv
 
 if TYPE_CHECKING:
@@ -43,6 +43,7 @@ _MILESTONES: tuple[tuple[str, str, str], ...] = (
     ("repo", "Pick a repository", "git-into-gsoc repo OWNER/NAME --track"),
     ("issue", "Track an issue you could work on", "git-into-gsoc issue OWNER/REPO#123 --track"),
     ("log", "Write a weekly note", 'git-into-gsoc log --goal "..." --done "..."'),
+    ("merged", "Get a pull request merged", "git-into-gsoc next"),
 )
 
 
@@ -64,7 +65,7 @@ def parse_topics(answer: str) -> list[str]:
 
 
 def milestones(summary: dict[str, Any]) -> list[dict[str, Any]]:
-    """Progress as five concrete steps, each done or not, from the saved progress file."""
+    """Progress as concrete steps, each done or not, from the saved progress file."""
     profile = summary.get("profile") or {}
     counts = {
         "profile": int(bool(profile.get("technologies") or profile.get("interests"))),
@@ -72,6 +73,8 @@ def milestones(summary: dict[str, Any]) -> list[dict[str, Any]]:
         "repo": len(summary.get("tracked_repos") or []),
         "issue": len(summary.get("tracked_issues") or []),
         "log": int(summary.get("log_entries") or 0),
+        # `next` records merged pull requests it finds once your profile has a username.
+        "merged": int(summary.get("contributions") or 0),
     }
     return [
         {"key": key, "label": label, "done": counts[key] > 0, "count": counts[key], "command": cmd}
@@ -121,7 +124,7 @@ def signed_in_login(toolkit: GSoCToolkit) -> str | None:
         return None
     try:
         login = toolkit.github.authenticated_login()
-    except (GigError, HttpError):
+    except GigError:
         return None
     return login
 
