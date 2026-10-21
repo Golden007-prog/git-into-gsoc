@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import codecs
+import contextlib
 import json
 import re
+import sys
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -27,8 +30,41 @@ console = Console()
 err_console = Console(stderr=True)
 
 
+def _tolerate_unencodable_output() -> None:
+    """Print "?" for characters the output encoding cannot represent, never crash.
+
+    On Windows, output that is piped (an assistant running a command, or `> file`)
+    uses a legacy code page such as cp1252, which has no ☐, ✓, or emoji, and issue
+    titles are full of emoji. JSON output is plain ASCII and unaffected.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(ValueError, OSError):
+                reconfigure(errors="replace")
+
+
+def _read_document(path: Path) -> str:
+    """Read a text file the way an editor would: UTF-8 (with or without a byte-order
+    mark), UTF-16 from Notepad or Word, or the Windows legacy code page."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise InputError(f"Cannot read {path}: {exc.strerror or exc}") from exc
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return raw.decode("utf-16", errors="replace")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
 class _FriendlyErrors(TyperGroup):
     """Render expected failures as one-line errors with a hint, not tracebacks."""
+
+    def main(self, *args: Any, **kwargs: Any) -> Any:
+        _tolerate_unencodable_output()
+        return super().main(*args, **kwargs)
 
     def invoke(self, ctx: Any) -> Any:
         try:
@@ -1113,11 +1149,8 @@ def proposal_cmd(
             console.print(f"  {i}. {section}")
         console.print("\n[dim]Check a draft: git-into-gsoc proposal draft.md --github you[/dim]")
         return
-    try:
-        text = file.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise InputError(f"Cannot read {file}: {exc.strerror or exc}") from exc
-    ideas_text = ideas_file.read_text(encoding="utf-8", errors="replace") if ideas_file else None
+    text = _read_document(file)
+    ideas_text = _read_document(ideas_file) if ideas_file else None
     report = _toolkit().check_proposal(text, github=github, verify=verify, ideas_text=ideas_text)
     if output == Output.json:
         _emit(report, output)
@@ -1486,8 +1519,6 @@ def setup_cmd(
 @app.command("doctor", rich_help_panel="Maintenance")
 def doctor_cmd() -> None:
     """Check your setup: version, GitHub token, data locations, API access, skill, and MCP."""
-    import sys
-
     from git_into_gsoc.config import cache_dir, data_dir, get_settings
     from git_into_gsoc.install.clients import env_home, installed_skills, registered_servers
     from git_into_gsoc.install.skill import InstallError, skill_source
