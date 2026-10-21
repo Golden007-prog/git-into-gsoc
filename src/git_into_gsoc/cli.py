@@ -622,7 +622,9 @@ def repo_cmd(
 def _ci_environment_lines(env: dict[str, Any]) -> list[str]:
     """One line per runtime, plus services and runners, as CI sets them up."""
     lines = [
-        f"CI uses {r['name']} {', '.join(r['versions'])}  [dim]({r['source']})[/dim]"
+        f"CI uses {r['name']} {', '.join(r['versions'])}"
+        + (f"; most jobs use {r['most_used']}" if r.get("most_used") else "")
+        + f"  [dim]({r['source']})[/dim]"
         for r in env.get("runtimes") or []
     ]
     services = env.get("services") or []
@@ -778,7 +780,11 @@ def issues_cmd(
     language: str | None = typer.Option(
         None, "--language", "-l", help="Programming language, for example python"
     ),
-    org: str | None = typer.Option(None, "--org", help="GitHub organization or user to search"),
+    org: str | None = typer.Option(
+        None,
+        "--org",
+        help="GSoC organization name (also searches projects its ideas page names) or GitHub login",
+    ),
     repo: str | None = typer.Option(None, "--repo", help="One repository as owner/name"),
     label: str | None = typer.Option(
         None, "--label", help="Label to require (default: good first issue, then help wanted)"

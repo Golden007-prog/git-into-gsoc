@@ -18,7 +18,18 @@ from git_into_gsoc.text import clean_untrusted
 
 PURPOSES: dict[str, tuple[str, ...]] = {
     "source": ("src", "lib", "pkg", "internal", "core", "app", "cmd", "packages", "crates"),
-    "tests": ("tests", "test", "spec", "specs", "__tests__", "e2e", "testing"),
+    "tests": (
+        "tests",
+        "test",
+        "spec",
+        "specs",
+        "__tests__",
+        "e2e",
+        "testing",
+        "autotest",
+        "unittest",
+        "unittests",
+    ),
     "docs": ("docs", "doc", "site", "website", "documentation", "wiki", "man"),
     "examples": ("examples", "example", "samples", "galleries", "demo", "demos", "tutorials"),
     "tooling": ("scripts", "tools", "bin", "ci", ".github", ".circleci", "build", "dev"),
@@ -38,7 +49,8 @@ TEST_RUNNER_RE = re.compile(
     r"\b(pytest|python -m pytest|tox\b|nox\b|npm (?:run )?test|pnpm (?:run )?test|yarn test|"
     r"cargo test|go test|make (?:test|check)|mvn (?:test|verify)|gradle(?:w)? test|ctest|"
     r"meson test|bundle exec rspec|rspec|phpunit|dotnet test|swift test|mix test|"
-    r"ninja test|hatch test|poetry run pytest|uv run pytest|just test)\b",
+    r"ninja test|hatch test|poetry run pytest|uv run pytest|just test|"
+    r"python -m unittest|autotest\.py|\w+_unittest\.py)\b",
     re.I,
 )
 CONVENTIONAL_RE = re.compile(
@@ -219,7 +231,9 @@ def find_paths(tree: list[dict[str, Any]]) -> dict[str, Any]:
             "docs/PULL_REQUEST_TEMPLATE.md",
             ".github/pull_request_template.md",
         ),
-        "workflows": sorted(workflows)[:20],
+        # Names only, so keep them all: ArduPilot has 33, and an alphabetical cut at 20
+        # dropped test_unit_tests.yml before the ranking could see it.
+        "workflows": sorted(workflows)[:100],
         "test_dirs": test_dirs[:8],
         "pre_commit": ".pre-commit-config.yaml" in lower,
         "commitlint": any(name.lower() in lower for name in COMMITLINT_FILES),
@@ -342,6 +356,7 @@ def ci_environment(workflows: dict[str, str]) -> dict[str, Any]:
     service containers, and runner operating systems. Setup instructions in a
     README drift; the workflow is what runs."""
     runtimes: dict[str, set[str]] = {}
+    uses: dict[str, Counter[str]] = {}  # how many jobs name each version
     sources: dict[str, str] = {}
     services: list[dict[str, str]] = []
     runners: set[str] = set()
@@ -357,6 +372,9 @@ def ci_environment(workflows: dict[str, str]) -> dict[str, Any]:
             if key in _RUNTIME_KEYS or key.endswith("-version"):
                 matrix.setdefault(key, [])
                 matrix[key].extend(v for v in values if v not in matrix[key])
+                runtime = _RUNTIME_KEYS.get(key)
+                if runtime:
+                    uses.setdefault(runtime, Counter()).update(values)
             elif key == "runs-on" and value and "${{" not in value:
                 runners.update(_scalar_list(value))
             elif key == "os" and values:
@@ -384,17 +402,23 @@ def ci_environment(workflows: dict[str, str]) -> dict[str, Any]:
             runtimes.setdefault(name, set()).update(values)
             sources.setdefault(name, path)
 
-    def version_key(v: str) -> tuple[int, ...] | tuple[str]:
-        parts = re.findall(r"\d+", v)
-        return tuple(int(p) for p in parts) if parts else (v,)
+    def version_key(v: str) -> tuple[bool, tuple[int, ...], str]:
+        # Plain versions first, numerically; other implementations (pypy2.7) after.
+        return (not v[:1].isdigit(), tuple(int(p) for p in re.findall(r"\d+", v)), v)
+
+    def most_used(name: str) -> str | None:
+        counts = uses.get(name)
+        if not counts:
+            return None
+        (top, n), *rest = [*counts.most_common(2), ("", 0)]
+        return top if n > 1 and n > rest[0][1] else None
 
     return {
         "runtimes": [
             {
                 "name": name,
-                "versions": sorted(
-                    values, key=lambda v: (str(type(version_key(v))), version_key(v))
-                )[:8],
+                "versions": sorted(values, key=version_key)[:8],
+                "most_used": most_used(name),
                 "source": sources[name],
             }
             for name, values in sorted(runtimes.items())
@@ -408,7 +432,8 @@ def ci_environment(workflows: dict[str, str]) -> dict[str, Any]:
 
 _INSTALL_RE = re.compile(
     r"\b(?:pip3? install|python -m pip install|uv (?:sync|pip install)|poetry install|"
-    r"pdm install|hatch env create|conda env create|npm (?:ci|install)|yarn(?: install)?\b|"
+    r"pdm install|hatch env create|conda env create|npm (?:ci|clean-install|install)|"
+    r"yarn(?: install)?\b|"
     r"pnpm install|bundle install|go mod download|cargo (?:build|fetch))",
     re.I,
 )
@@ -416,7 +441,9 @@ _INSTALL_RE = re.compile(
 
 # "pip install --upgrade pip setuptools" prepares the installer; it installs nothing of the project.
 _TOOLING_ONLY_RE = re.compile(
-    r"install\s+(?:(?:-U|--upgrade|-q|--quiet)\s+)*(?:(?:pip|setuptools|wheel|build|uv)\b\s*)+$",
+    r"install\s+(?:(?:-U|--upgrade|-q|--quiet)\s+)*(?:(?:pip|setuptools|wheel|build|uv)\b\s*)+$"
+    # "npm install --global npm@11" updates npm itself, not the project.
+    r"|\b(?:npm|pnpm) (?:install|i)\b.*(?:-g|--global)\b",
     re.I,
 )
 
@@ -746,25 +773,37 @@ def workflow_gates(workflows: dict[str, str]) -> list[dict[str, str]]:
     return gates
 
 
+def ci_test_dirs_first(test_dirs: list[str], workflow_texts: dict[str, str]) -> list[str]:
+    """Test folders the CI workflows name come first (ArduPilot's Tools/autotest beats a
+    folder with more test-named files that CI never runs); order is otherwise kept."""
+    ci_text = "\n".join(workflow_texts.values())
+    return sorted(test_dirs, key=lambda d: f"{d}/" not in ci_text)
+
+
 def rank_workflows(paths: list[str], *, limit: int = 2) -> list[str]:
     """Workflow files most likely to run the test suite, best first."""
 
+    # Best first. Checks on branch names, sizes, or style run on every pull request but
+    # test nothing; quality gates and pull-request workflows run the tests more often
+    # than builds do.
+    tiers = (
+        r"assign|triage|greet|welcome|first[-_]?interaction|dependabot|codeql|lock|"
+        r"\bbots?\b|[-_]bot\b|issue",
+        r"convention|ratchet|size|lint|format|spell|label|stale|comment",
+        r"unit",
+        r"test|pytest|tox|nox",
+        r"^ci\b|[._-]ci\b|\bci[._-]|check|quality|gate|verify|validate|pull[_-]?request|^pr[._-]",
+        r"main|build",
+        r"release|publish|deploy|docs|close|welcome",
+    )
+    order = (8, 7, 0, 1, 2, 3, 5)
+
     def priority(path: str) -> tuple[int, str]:
         name = path.rsplit("/", 1)[-1].lower()
-        if re.search(r"test|pytest|tox|nox", name):
-            return (0, name)
-        # Quality gates and pull-request workflows run the tests more often than builds do.
-        if re.search(
-            r"^ci\b|[._-]ci\b|\bci[._-]|check|quality|gate|unit|verify|validate|"
-            r"pull[_-]?request|^pr[._-]",
-            name,
-        ):
-            return (1, name)
-        if re.search(r"main|build", name):
-            return (2, name)
-        if re.search(r"release|publish|deploy|docs|label|stale|close|comment|lint|welcome", name):
-            return (4, name)
-        return (3, name)
+        for pattern, rank in zip(tiers, order, strict=True):
+            if re.search(pattern, name):
+                return (rank, name)
+        return (4, name)
 
     return sorted(paths, key=priority)[:limit]
 

@@ -353,10 +353,16 @@ jobs:
 """
     env = ci_environment({".github/workflows/tests.yml": workflow})
     assert env["runtimes"] == [
-        {"name": "Node.js", "versions": ["20", "22"], "source": ".github/workflows/tests.yml"},
+        {
+            "name": "Node.js",
+            "versions": ["20", "22"],
+            "most_used": None,
+            "source": ".github/workflows/tests.yml",
+        },
         {
             "name": "Python",
             "versions": ["3.11", "3.12", "3.13"],
+            "most_used": None,
             "source": ".github/workflows/tests.yml",
         },
     ]
@@ -527,3 +533,100 @@ def test_policy_quotes_drop_markdown_escapes() -> None:
     text = "We typically do not assign issues, simply work on it\\* and open a PR.\n"
     quotes = [q["text"] for q in policy_quotes({"CONTRIBUTING.md": text})]
     assert quotes == ["We typically do not assign issues, simply work on it* and open a PR."]
+
+
+ARDUPILOT_WORKFLOWS = [
+    f".github/workflows/{n}.yml"
+    for n in (
+        "test_branch_conventions",
+        "test_ccache",
+        "test_chibios",
+        "test_coverage",
+        "test_location_ratchet",
+        "test_size",
+        "test_sitl_copter",
+        "test_unit_tests",
+        "workflows_lint",
+    )
+]
+
+
+def test_unit_test_workflows_rank_first_and_convention_checks_last() -> None:
+    # A simulated run: orient read test_branch_conventions.yml as "what CI runs".
+    ranked = rank_workflows(ARDUPILOT_WORKFLOWS, limit=3)
+    assert ranked[0].endswith("test_unit_tests.yml")
+    assert not any("conventions" in p or "size" in p or "ratchet" in p for p in ranked)
+
+
+def test_ci_commands_include_autotest_and_unittest_scripts() -> None:
+    workflow = (
+        "jobs:\n  t:\n    steps:\n      - run: |\n"
+        "          Tools/autotest/unittest/extract_param_defaults_unittest.py\n"
+        "          Tools/autotest/autotest.py test.CAN --debug\n"
+    )
+    commands = [c["command"] for c in ci_test_commands({"t.yml": workflow})]
+    assert "Tools/autotest/autotest.py test.CAN --debug" in commands
+    assert any(c.endswith("_unittest.py") for c in commands)
+
+
+def test_test_folders_that_ci_runs_come_first() -> None:
+    from git_into_gsoc.github.orientation import PURPOSES, ci_test_dirs_first
+
+    dirs = ["Tools/renode/tests", "libraries/AP_Math/tests", "Tools/autotest"]
+    texts = {"t.yml": "run: Tools/autotest/autotest.py test.CAN --debug"}
+    assert ci_test_dirs_first(dirs, texts) == [
+        "Tools/autotest",
+        "Tools/renode/tests",
+        "libraries/AP_Math/tests",
+    ]
+    assert ci_test_dirs_first(dirs, {}) == dirs
+    assert "autotest" in PURPOSES["tests"]
+
+
+def test_ci_versions_put_the_usual_one_first_and_other_implementations_last() -> None:
+    # sympy/sympy: one job checks the Python 2 error message on pypy2.7, and orient
+    # printed "CI uses Python pypy2.7, 3.10, ..." as if Python 2 were supported.
+    job = "    steps:\n      - uses: actions/setup-python@v6\n        with:\n"
+    workflow = "jobs:\n"
+    for version in ("'3.14'", "'3.14'", "'3.14'", "'3.13'", "'pypy2.7'"):
+        workflow += f"  j{len(workflow)}:\n{job}          python-version: {version}\n"
+    workflow += "  m:\n    strategy:\n      matrix:\n        python-version: ['3.10', '3.11', 'pypy-3.11']\n"
+    python = ci_environment({"runtests.yml": workflow})["runtimes"][0]
+    assert python["versions"] == ["3.10", "3.11", "3.13", "3.14", "pypy2.7", "pypy-3.11"]
+    assert python["most_used"] == "3.14"
+
+
+def test_ci_install_commands_skip_pip_upgrades_and_prefer_the_common_one() -> None:
+    from git_into_gsoc.github.orientation import ci_install_commands
+
+    # sympy/sympy runtests.yml (2026-10-21), shortened.
+    workflow = (
+        "jobs:\n  a:\n    steps:\n      - run: python -m pip install --upgrade pip setuptools\n"
+        "      - run: pip install -r requirements-dev.txt\n      - run: pip install .\n"
+        "  b:\n    steps:\n      - run: python -m pip install --upgrade pip\n"
+        "      - run: pip install -r requirements-dev.txt\n      - run: pytest -n auto\n"
+    )
+    commands = [c["command"] for c in ci_install_commands({"runtests.yml": workflow})]
+    assert commands[0] == "pip install -r requirements-dev.txt"
+    assert not any("--upgrade pip" in c for c in commands)
+    node = "jobs:\n  t:\n    steps:\n      - run: npm ci\n      - run: npm test\n"
+    assert [c["command"] for c in ci_install_commands({"n.yml": node})] == ["npm ci"]
+
+
+def test_automation_workflows_are_not_read_as_the_test_setup() -> None:
+    # CircuitVerse/Interactive-Book: orient said "CI uses Node.js 16" from
+    # issue-assign-to-contributor.yml, a bot that assigns issues.
+    paths = [f".github/workflows/{n}.yml" for n in ("deploy", "issue-assign-to-contributor")]
+    paths += [".github/workflows/language.yml"]
+    assert rank_workflows(paths, limit=3)[-1].endswith("issue-assign-to-contributor.yml")
+
+
+def test_installing_npm_itself_is_not_the_project_install() -> None:
+    from git_into_gsoc.github.orientation import ci_install_commands
+
+    # OWASP/threat-dragon: the draft listed "npm install --global npm@11.18.0".
+    workflow = (
+        "jobs:\n  t:\n    steps:\n      - run: npm install --global npm@11.18.0\n"
+        "      - run: npm clean-install\n      - run: npm run test:unit\n"
+    )
+    assert [c["command"] for c in ci_install_commands({"t.yml": workflow})] == ["npm clean-install"]

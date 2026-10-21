@@ -192,3 +192,85 @@ def test_claim_draft_reads_the_whole_contributing_guide(monkeypatch) -> None:  #
     assert draft["context"]["claim_convention"] == {"kind": "command", "text": "@zulipbot claim"}
     assert "@zulipbot claim" in draft["template"]
     assert "contributing_text" not in guide.model_dump()  # never printed or sent to assistants
+
+
+def test_pr_draft_uses_the_install_and_test_commands_ci_runs(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from git_into_gsoc.models import ContributionGuide
+    from git_into_gsoc.service import GSoCToolkit
+
+    # A real run on sympy/sympy: the draft said "<the project's test command>" although
+    # orient knew CI runs `pytest -n auto`, and it never said how to install.
+    toolkit = GSoCToolkit()
+    gh = toolkit.github
+    monkeypatch.setattr(gh, "get_repo", lambda o, r: {"default_branch": "master"})
+    monkeypatch.setattr(gh, "branch_rules", lambda *a: [])
+    monkeypatch.setattr(
+        gh, "contribution_guide", lambda repo: ContributionGuide(repo="sympy/sympy")
+    )
+    tree = {"tree": [{"path": ".github/workflows/runtests.yml", "type": "blob"}]}
+    monkeypatch.setattr(gh, "git_tree", lambda *a: tree)
+    workflow = (
+        "jobs:\n  t:\n    steps:\n      - run: python -m pip install --upgrade pip\n"
+        "      - run: pip install -r requirements-dev.txt\n      - run: pytest -n auto\n"
+    )
+    monkeypatch.setattr(gh, "get_raw_file", lambda *a: workflow)
+    draft = toolkit.draft("pr", repo="sympy/sympy")
+    assert "pip install -r requirements-dev.txt   # install as CI does" in draft["template"]
+    assert "pytest -n auto   # run the tests once" in draft["template"]
+    assert "<the project's test command>" not in draft["template"]
+    assert "python3 -m venv .venv" in draft["template"]  # before any pip install
+
+
+def test_manifest_commands_fill_in_when_ci_has_no_tests() -> None:
+    from git_into_gsoc.drafts import manifest_commands
+
+    # processing/p5.sound.js (2026-10-21): no test workflow, package.json has only "build".
+    names = {"package.json", "package-lock.json"}
+    install, check = manifest_commands(names, package_json='{"scripts": {"build": "rollup -c"}}')
+    assert install == ["npm ci"] and check == "npm run build"
+    install, check = manifest_commands(
+        {"package.json", "yarn.lock"}, package_json='{"scripts": {"test": "jest"}}'
+    )
+    assert install == ["yarn install"] and check == "yarn test"
+    npm_default = '{"scripts": {"test": "echo \\"Error: no test specified\\" && exit 1"}}'
+    assert manifest_commands({"package.json"}, package_json=npm_default)[1] is None
+    assert manifest_commands({"pyproject.toml", "tests"}, package_json=None) == (
+        ["pip install -e ."],
+        "pytest",
+    )
+    assert manifest_commands({"Cargo.toml"}, package_json=None) == ([], "cargo test")
+    assert manifest_commands({"Gemfile"}, package_json=None) == (["bundle install"], None)
+
+
+def test_pr_draft_says_when_no_test_command_exists(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from git_into_gsoc.drafts import render_draft
+
+    draft = render_draft(
+        "pr",
+        context={
+            "repo": "processing/p5.sound.js",
+            "default_branch": "main",
+            "install_commands": ["npm ci"],
+            "commands_source": "package.json",
+            "test_commands": ["npm run build"],
+            "test_is_build": True,
+        },
+    )
+    assert "npm ci   # install (from package.json)" in draft["template"]
+    assert "npm run build   # no test command found; at least check it builds" in draft["template"]
+
+
+def test_pr_draft_lists_each_install_step_once() -> None:
+    from git_into_gsoc.drafts import render_draft
+
+    # OWASP/threat-dragon: "npm clean-install" and "npm clean-install --ignore-scripts".
+    draft = render_draft(
+        "pr",
+        context={
+            "repo": "OWASP/threat-dragon",
+            "default_branch": "main",
+            "install_commands": ["npm clean-install", "npm clean-install --ignore-scripts"],
+            "test_commands": ["npm run test:desktop"],
+        },
+    )
+    assert draft["template"].count("npm clean-install") == 1
