@@ -768,6 +768,7 @@ _STATUS_STYLE = {
     "claimed": "yellow",
     "contested": "yellow",
     "likely_taken": "red",
+    "not_open": "red",
     "assigned": "red",
     "stale": "dim",
     "closed": "dim",
@@ -805,6 +806,12 @@ def issues_cmd(
         _emit(data, output)
         return
     data = _markup_safe(data)
+    if not data["issues"]:
+        console.print(f"No free beginner issues found. {data['note']}")
+        console.print("[bold]Try next[/bold]")
+        for step in data["next_steps"]:
+            console.print(f"  • {step}")
+        return
     table = Table(title="Beginner-friendly issues", caption=data["note"])
     table.add_column("Score", justify="right")
     table.add_column("Status")
@@ -824,8 +831,7 @@ def issues_cmd(
             issue["title"],
         )
     console.print(table)
-    if data["issues"]:
-        console.print("[dim]Next: git-into-gsoc issue owner/repo#N before you comment.[/dim]")
+    console.print("[dim]Next: git-into-gsoc issue owner/repo#N before you comment.[/dim]")
 
 
 @app.command("issue", rich_help_panel="Pick a repository and an issue")
@@ -918,6 +924,8 @@ def profile_cmd(
     console.print(Panel(Text.from_markup("\n".join(lines)), title="Your profile"))
     if data.get("warning"):
         console.print(f"[yellow]![/yellow] {data['warning']}")
+    if data.get("hours_note"):
+        console.print(f"[yellow]![/yellow] {data['hours_note']}")
 
 
 @app.command("pointers", rich_help_panel="Pick a repository and an issue")
@@ -1426,6 +1434,8 @@ def next_cmd(
         )
         for part in budget["suggested_split"]:
             console.print(f"  {part['hours']:>4} h  {escape(part['what'])}")
+    if data.get("hours_note"):
+        console.print(f"\n[yellow]![/yellow] {escape(data['hours_note'])}")
     if data["changes"]:
         console.print("\n[bold]Changed since your last check[/bold]")
         for change in data["changes"]:

@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from git_into_gsoc.coach import plan_actions, time_budget, upcoming_deadlines
+from git_into_gsoc.coach import hours_note, plan_actions, time_budget, upcoming_deadlines
 from git_into_gsoc.config import (
     DEFAULT_TARGET_YEAR,
     LATEST_ARCHIVED_YEAR,
@@ -58,7 +58,7 @@ from git_into_gsoc.github.repos import (
     pick_beginner_label,
     repo_lead_score,
 )
-from git_into_gsoc.github.search import build_issue_query, or_group
+from git_into_gsoc.github.search import RELATED_LANGUAGES, build_issue_query, or_group
 from git_into_gsoc.gsoc.archive import ArchiveClient, proposal_folders, summarize_mentors
 from git_into_gsoc.gsoc.client import GSoCClient
 from git_into_gsoc.gsoc.ideas import fetch_ideas_text
@@ -73,12 +73,14 @@ from git_into_gsoc.guidance import journey_overview, proposal_checklist
 from git_into_gsoc.http_client import CachedHttpClient, HttpError, NotFoundError
 from git_into_gsoc.models import (
     Availability,
+    ContactChannel,
     IdeasDocument,
     ProgressState,
     ProjectIdea,
     RepoLead,
 )
 from git_into_gsoc.progress.store import ProgressStore
+from git_into_gsoc.scoring.org_match import canonical
 from git_into_gsoc.text import clean_untrusted
 from git_into_gsoc.validation import (
     parse_issue_ref,
@@ -113,6 +115,44 @@ _MANIFESTS = ("package.json", "pyproject.toml", "setup.py", "Cargo.toml", "go.mo
 # Match reasons from an organization's own topic tags or category; a passing mention in
 # its description (LLVM mentions "embedded") is too weak to count as an interest match.
 _TOPIC_REASONS = ("Topic", "Related topic", "Category")
+
+
+# Where a newcomer should say hello, best first. A contact email reaches the
+# org admins or mentors privately, so a public introduction never goes there.
+_PUBLIC_CHANNEL_ORDER = ("chat", "irc", "forum", "mailingList")
+
+
+def public_channels(channels: list[ContactChannel]) -> list[str]:
+    """The org's public channels, chat first, leaving out private emails and blogs."""
+    ranked = sorted(
+        (c for c in channels if c.kind in _PUBLIC_CHANNEL_ORDER),
+        key=lambda c: _PUBLIC_CHANNEL_ORDER.index(c.kind),
+    )
+    return [c.value for c in ranked]
+
+
+def _when_no_issues(language: str | None, *, org: str | None, repo: str | None) -> list[str]:
+    """What to try when a search finds no free beginner issues."""
+    if repo:
+        return [
+            f"Read {repo}'s open issues yourself: a small bug, a docs gap, or a missing "
+            "test is a fine first contribution even without a beginner label.",
+            "Ask in the project's public channel which small task would help most.",
+            'Or pick another repository: git-into-gsoc repos "ORG NAME"',
+        ]
+    steps = [
+        "Pick an organization first: git-into-gsoc orgs"
+        + (f" --tech {language}" if language else ""),
+        'List its repositories: git-into-gsoc repos "ORG NAME", then '
+        "git-into-gsoc issues --repo owner/name (it uses that repository's own beginner label).",
+    ]
+    if not org:
+        steps.append("Search every repository, not only GSoC organizations: add --scope all")
+    steps.append(
+        "Beginner labels go fast before GSoC. A small fix you find yourself counts too; "
+        "ask in the project's channel before you start."
+    )
+    return steps
 
 
 class GSoCToolkit:
@@ -412,14 +452,17 @@ class GSoCToolkit:
             "next_step": "Run `repo owner/name` on your top pick, then `issues --repo owner/name`.",
         }
 
-    def _gsoc_owners(self, name: str, *, language: str | None) -> tuple[list[str], str]:
-        """GitHub owners to search for a GSoC organization's name, with a note; [] if none."""
+    def _gsoc_owners(self, name: str, *, language: str | None) -> tuple[list[str], list[str], str]:
+        """A GSoC organization's own GitHub owners, the ones its ideas page links to, and a note.
+
+        Both lists are empty when the name is not a GSoC organization with GitHub owners.
+        """
         try:
             gsoc_org = self.gsoc.get_organization(name)
         except GigError:
-            return [], ""
+            return [], [], ""
         if gsoc_org is None or not gsoc_org.github_orgs:
-            return [], ""
+            return [], [], ""
         owners = list(gsoc_org.github_orgs[:3])
         ideas = fetch_ideas_text(self.http, gsoc_org.ideas_url, self.settings.archive_ttl_seconds)
         linked: list[str] = []
@@ -430,7 +473,7 @@ class GSoCToolkit:
         note = f"Searching {gsoc_org.name}: {', '.join(owners)}"
         if linked:
             note += f", and {', '.join(linked[:4])} (named on its ideas page)"
-        return [*owners, *linked[:4]], note + "."
+        return owners, linked[:4], note + "."
 
     def _repos_named_on_page(
         self, text: str, searched: list[str], *, language: str | None, limit: int = 6
@@ -446,6 +489,10 @@ class GSoCToolkit:
         for match in _GITHUB_PROJECT_RE.finditer(text):
             owner, repo = match.group(1), match.group(2)
             if not repo or owner.lower() in skip or repo.lower() in _NOT_REPOS:
+                continue
+            # A link to someone's pull request or commit is an example to follow,
+            # not a project to work on: Zulip's page links a flutter/flutter PR.
+            if _CHANGE_LINK_RE.match(text, match.end()):
                 continue
             full = f"{owner}/{repo.removesuffix('.git')}"
             if full not in named:
@@ -508,12 +555,19 @@ class GSoCToolkit:
         # organizations whose repositories its ideas page names (Open Robotics lists
         # only openrobotics and osrf; its ROS work is under ros2 and open-rmf).
         gsoc_owners: list[str] = []
+        linked: list[str] = []
         if org and not repo:
-            gsoc_owners, owners_note = self._gsoc_owners(org, language=language)
+            own_owners, linked, owners_note = self._gsoc_owners(org, language=language)
+            gsoc_owners = [*own_owners, *linked]
             if gsoc_owners:
                 shortlist, org = gsoc_owners, None
                 gsoc_name = owners_note.removeprefix("Searching ").split(":", 1)[0]
-                owner_names = {**owner_names, **{o.lower(): gsoc_name for o in gsoc_owners}}
+                # A linked project is not the organization's own: say where it came from.
+                owner_names = {
+                    **owner_names,
+                    **{o.lower(): gsoc_name for o in own_owners},
+                    **{o.lower(): f"named on the {gsoc_name} ideas page" for o in linked},
+                }
         use_gsoc = scope == "gsoc" and not org and not repo and bool(shortlist)
         if gsoc_owners:
             note = owners_note
@@ -543,6 +597,17 @@ class GSoCToolkit:
             max_results=max_results,
             org_names=owner_names,
         )
+        if gsoc_owners and linked:
+            # Free issues first; among them, the organization's own before linked projects.
+            linked_owners = {o.lower() for o in linked}
+            issues.sort(
+                key=lambda i: (
+                    i.availability != Availability.AVAILABLE,
+                    i.repo.split("/", 1)[0].lower() in linked_owners,
+                    -i.beginner_score,
+                )
+            )
+            note += " Its own repositories come first, then the linked ones."
         if use_gsoc and narrowed and not gsoc_owners and len(issues) < 3:
             # Too few in the organizations that fit the interests: keep those first and
             # fill the list from every organization that uses the language.
@@ -570,6 +635,13 @@ class GSoCToolkit:
             note += (
                 f" Only {first} issue(s) came from those; the rest are from other "
                 f"organizations that use {language}."
+                if len(issues) > first
+                else f" Other organizations that use {language} had none free either."
+            )
+        related = RELATED_LANGUAGES.get(canonical(language), []) if language else []
+        if related and not repo:
+            note += (
+                f" Also searching {', '.join(related)} repositories, which often hold this work."
             )
         return {
             "scope": "gsoc" if use_gsoc else "custom",
@@ -579,6 +651,7 @@ class GSoCToolkit:
             "count": len(issues),
             "issues": [_issue_dict(i) for i in issues],
             "before_you_comment": BEFORE_YOU_COMMENT,
+            "next_steps": [] if issues else _when_no_issues(language, org=org, repo=repo),
         }
 
     def issue_status(self, ref: str, number: int | None = None) -> dict[str, Any]:
@@ -674,6 +747,8 @@ class GSoCToolkit:
         profile = self.progress.profile()
         if warning:
             profile["warning"] = warning
+        if hours_per_week is not None and hours_note(hours_per_week):
+            profile["hours_note"] = hours_note(hours_per_week)
         return profile
 
     def recommend_path(
@@ -915,6 +990,7 @@ class GSoCToolkit:
             },
             "deadlines": upcoming_deadlines(program),
             "time_budget": time_budget(state, program, now=now),
+            "hours_note": hours_note((state.profile or {}).get("hours_per_week")),
             "progress": self.progress.summary(),
             "tracked_issues": tracked,
             "open_pull_requests": open_prs,
@@ -1319,9 +1395,7 @@ class GSoCToolkit:
             found = self.gsoc.get_organization(org)
             if found:
                 context["org"] = found.name
-                context["channels"] = [c.value for c in found.channels if c.kind == "chat"] or [
-                    c.value for c in found.channels
-                ]
+                context["channels"] = public_channels(found.channels)
         if issue:
             owner, name, num = parse_issue_ref(issue)
             repo = repo or f"{owner}/{name}"
@@ -1330,6 +1404,7 @@ class GSoCToolkit:
                 status = self.issue_status(issue)
                 context["issue"]["title"] = clean_untrusted(status.get("title"), limit=200)
                 context["issue"]["availability"] = status.get("availability")
+                context["issue"]["reason"] = status.get("reason")
             except GigError as exc:
                 context["issue"]["note"] = str(exc)
         if repo:
@@ -1395,8 +1470,11 @@ class GSoCToolkit:
             if k in {"org", "channels", "issue", "claim_convention", "contributing_url"}
         }
         if context.get("issue", {}).get("availability") not in (None, "available"):
+            issue_info = context["issue"]
             draft["warning"] = (
-                f"Issue availability is {context['issue']['availability']}; check the thread "
+                f"Do not post a claim: {issue_info.get('reason')}."
+                if issue_info["availability"] == "not_open" and kind == "claim"
+                else f"Issue availability is {issue_info['availability']}; check the thread "
                 "before claiming."
             )
         return draft
@@ -1801,6 +1879,7 @@ _GITHUB_PROJECT_RE = re.compile(
 )
 _NOT_OWNERS = {"orgs", "topics", "search", "features", "apps", "settings", "marketplace"}
 _NOT_REPOS = {"wiki", "issues", "blob", "tree", "pulls", "discussions", "projects"}
+_CHANGE_LINK_RE = re.compile(r"/(?:pull|pulls|commit|commits|compare)\b")
 
 
 def _github_links(text: str) -> list[dict[str, str]]:
