@@ -675,6 +675,13 @@ class OrgIndex:
         active = int(profile.github.get("active_repos") or 0)
         if active:
             readiness_lines.append(f"{active} GitHub repositories pushed in the last year")
+        labelled = int(profile.github.get("beginner_issues_year") or 0)
+        if labelled:
+            # Only a count is shown. Zero is not: MDAnalysis marks first tasks
+            # "Difficulty-easy" and Neovim "complexity:low", which the common spellings miss.
+            readiness_lines.append(
+                f"{labelled} GitHub issue(s) with a common beginner label opened in the past year"
+            )
 
         # A fit needs something to fit: a category or a bare listing has none.
         fit = _fit_level(relevance, interests, skills) if (query or not person.empty) else None
