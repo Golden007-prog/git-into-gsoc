@@ -25,6 +25,7 @@ from git_into_gsoc.config import (
 )
 from git_into_gsoc.drafts import DRAFT_KINDS, claim_convention, manifest_commands, render_draft
 from git_into_gsoc.errors import GigError, InputError, reset_phrase
+from git_into_gsoc.github.availability import CONTESTED_MIN_CLAIMANTS
 from git_into_gsoc.github.client import GitHubClient
 from git_into_gsoc.github.orientation import (
     active_committers,
@@ -2388,6 +2389,22 @@ class GSoCToolkit:
                 context["issue"]["title"] = clean_untrusted(status.get("title"), limit=200)
                 context["issue"]["availability"] = status.get("availability")
                 context["issue"]["reason"] = status.get("reason")
+                # Free by the rules, but someone asked over a month ago and opened nothing:
+                # the claim should ask them first (`issue` already said so; `draft` did not).
+                # Newest first. A maintainer's old "yes" with no PR since counts too: that
+                # person is the one most worth asking.
+                earlier = [
+                    {
+                        "login": clean_untrusted(c.get("login"), limit=40),
+                        "days_ago": c["days_ago"],
+                        "granted": bool(c.get("granted")),
+                    }
+                    for c in (status.get("assessment") or {}).get("claims") or []
+                    if c.get("login") and c.get("days_ago") is not None
+                ]
+                if earlier and status.get("availability") == "available":
+                    context["issue"]["earlier_claims"] = earlier[:3]
+                    context["issue"]["earlier_claim_count"] = len(earlier)
             except GigError as exc:
                 context["issue"]["note"] = str(exc)
         if repo:
@@ -2474,6 +2491,24 @@ class GSoCToolkit:
                 warnings.append(
                     f"Issue availability is {issue_info['availability']}; check the thread "
                     "before claiming."
+                )
+        issue_ctx = context.get("issue") or {}
+        earlier = issue_ctx.get("earlier_claims") or []
+        if kind == "claim" and earlier:
+            newest, count = earlier[0], issue_ctx.get("earlier_claim_count") or len(earlier)
+            if count >= CONTESTED_MIN_CLAIMANTS:
+                # The same advice `issue` gives: one more request is the noise maintainers dread.
+                warnings.append(
+                    f"{count} people asked to work on this, the latest @{newest['login']} "
+                    f"{newest['days_ago']} days ago, and none opened a pull request. Post a "
+                    "concrete plan instead of another request, or pick another issue."
+                )
+            else:
+                said = "was told yes" if newest["granted"] else "asked to work on this"
+                warnings.append(
+                    f"@{newest['login']} {said} {newest['days_ago']} days ago and no pull request "
+                    "followed. Ask them in the thread first, and pick another issue if they are "
+                    "still on it."
                 )
         for url in context.get("closed_channels") or []:
             warnings.append(
