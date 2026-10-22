@@ -444,8 +444,15 @@ _EVENT_REPO = re.compile(
 # Repositories for governance, GSoC applications, tests, or experiments.
 _NOT_CODE_REPO = re.compile(
     r"(?:^|[-_.])(?:tsc|governance|steering|working-groups?|rfcs?|community|meta|admin|"
-    r"enhancements|proposals|meetings?|minutes|status-reports?|gsoc\d*|summer-of-code|"
-    r"outreachy|test-actions|sandbox|playground|demo|scratch)(?:$|[-_.])|^\.github$|^test-",
+    r"enhancements|proposals|meetings?|minutes|status-reports?|"
+    r"test-actions|sandbox|playground|demo|scratch)(?:$|[-_.])|^\.github$|^test-",
+    re.I,
+)
+# A repository for a mentoring program's applications or ideas (gsoc, gsoc2026,
+# gsoc-2026-ideas, outreachy). Only as the first word: git-into-gsoc or a
+# foo-gsoc-tools library is code like any other.
+_PROGRAM_REPO = re.compile(
+    r"^(?:gsoc|google-summer-of-code|summer-of-code|outreachy)(?:$|[-_.\d])",
     re.I,
 )
 # Build, CI, packaging, and release tooling around a project, not the project.
@@ -465,7 +472,8 @@ _WEBSITE_REPO = re.compile(
 
 def is_not_code_repo(full_name: str) -> bool:
     """True for a governance, GSoC application, test, or sandbox repository."""
-    return bool(_NOT_CODE_REPO.search(str(full_name).split("/")[-1]))
+    name = str(full_name).split("/")[-1]
+    return bool(_NOT_CODE_REPO.search(name) or _PROGRAM_REPO.search(name))
 
 
 def is_event_repo(full_name: str) -> bool:
