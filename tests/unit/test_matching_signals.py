@@ -196,3 +196,33 @@ def test_a_failed_canary_keeps_last_months_counts_and_statements() -> None:
         merged["github"]["beginner_issues_year"] == 9
         and merged["participation"]["status"] == "posted"
     )
+
+
+def test_competencies_in_a_skills_field_are_not_the_project_subject() -> None:
+    # Oppia lists what a contributor does ("Debug; fix CI failures", "Write Python code
+    # with unit tests"); read as subjects, developer tools landed in 10 of its 11 ideas.
+    from git_into_gsoc.matching.ideas import skill_concepts
+    from git_into_gsoc.matching.signals import summarize_ideas
+
+    assert skill_concepts("Debug; fix CI failures; flakes") == []
+    assert skill_concepts("Write Python code with unit tests") == ["python"]
+    assert skill_concepts("Build an IDE plugin") == ["developer tools"]
+    assert skill_concepts("CI/CD pipelines") == ["devops"]
+    # What a testing project works on is still its subject, and nothing new appears.
+    assert "developer tools" in skill_concepts("Python, testing")
+    assert skill_concepts("test frameworks") == ["developer tools"]
+    assert skill_concepts("test automation") == ["developer tools"]
+    # InVesalius asks for "A source code editor" in all 9 ideas: a tool to have, not
+    # the subject. Building a debugger, an editor plugin, or a review tool is one.
+    assert skill_concepts("A source code editor") == []
+    assert skill_concepts("Mac OS installed. A source code editor") == []
+    assert skill_concepts("Build a debugger UI")[0] == "developer tools"
+    assert skill_concepts("Build a code editor plugin") == ["developer tools"]
+    assert skill_concepts("a code review tool") == ["developer tools"]
+    assert skill_concepts("Debugging skills") == []
+    summary = summarize_ideas(
+        [{"title": "Web user feedback", "skills": ["Debug", "Write Python code with unit tests"]}],
+        layout="headings",
+        url="https://x",
+    )
+    assert "developer tools" not in summary["ideas"][0].get("k", [])
