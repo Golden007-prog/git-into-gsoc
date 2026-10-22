@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.23.1](https://github.com/anandkaranubc/git-into-gsoc/compare/v0.23.0...v0.23.1) (2026-10-22)
+
+
+### Bug Fixes
+
+* **ideas:** keep a size stated in other hours, such as 300 or 80 to 160, with the nearest GSoC size ([#321](https://github.com/anandkaranubc/git-into-gsoc/issues/321)) ([1d60ff2](https://github.com/anandkaranubc/git-into-gsoc/commit/1d60ff296e501bf48028a7de75e02c2408329a4c))
+* **matching:** count a language family together when naming an organization's main code ([#329](https://github.com/anandkaranubc/git-into-gsoc/issues/329)) ([b861de5](https://github.com/anandkaranubc/git-into-gsoc/commit/b861de586dbddc2fc6575f3ebd8105ec9ba30c5f))
+
+
+### Documentation
+
+* **distribution:** Smithery takes no new servers, and two listing requests are filed ([#335](https://github.com/anandkaranubc/git-into-gsoc/issues/335)) ([1892870](https://github.com/anandkaranubc/git-into-gsoc/commit/1892870fa6247a7c1f6e7d72304e2b5d9107fd4c))
+* **guide:** close the last chapter the way the others close ([#333](https://github.com/anandkaranubc/git-into-gsoc/issues/333)) ([f0768f6](https://github.com/anandkaranubc/git-into-gsoc/commit/f0768f65e4209393ebe35c408931499512cb4f07))
+* **tests:** say the fenced-block case was caught in review, not which session found it ([#334](https://github.com/anandkaranubc/git-into-gsoc/issues/334)) ([0ff9a36](https://github.com/anandkaranubc/git-into-gsoc/commit/0ff9a369056f3f293f2935e7523c91aa38a83ccd))
+* the progress summary as it prints today, and token setup that works without a copy of the code ([#337](https://github.com/anandkaranubc/git-into-gsoc/issues/337)) ([ee3278d](https://github.com/anandkaranubc/git-into-gsoc/commit/ee3278dcc95223f2a5015a53a484ad21176870f2))
+
 ## [0.23.0](https://github.com/anandkaranubc/git-into-gsoc/compare/v0.22.0...v0.23.0) (2026-10-22)
 
 
