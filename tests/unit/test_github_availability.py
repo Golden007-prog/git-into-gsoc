@@ -1032,3 +1032,15 @@ def test_a_comment_with_a_plan_is_a_claim() -> None:
     assert not is_claim("Will you add a changelog entry?")
     timeline = [_comment("dana", plan, 2)]
     assert assess_issue(_issue(), timeline, now=NOW).availability == Availability.CLAIMED
+
+
+def test_a_plan_heading_padded_with_spaces_is_read_quickly() -> None:
+    # A stranger's comment is untrusted input: "## Plan" plus 50,000 spaces and a letter
+    # once made the heading pattern backtrack over every split of the spaces.
+    import time
+
+    start = time.perf_counter()
+    assert not is_claim("## Plan" + " " * 50_000 + "x")
+    assert not is_claim("## Plan" + " " * 50_000 + ":" + " " * 50_000 + "x")
+    assert time.perf_counter() - start < 1.0
+    assert is_claim("## Plan:  \n\nShip the fix in one file.")

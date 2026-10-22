@@ -95,8 +95,10 @@ _CLAIM_PATTERNS = [
     # (a launch audit, 0.23.0). Measured on the five labelled samples (1,900 comments):
     # seven more claims caught, one more false alarm ("I'll update the PR to whichever
     # you pick", from someone whose open pull request already marks the issue taken).
-    r"^\ufeff?\s*#{1,6}\s*(?:planned change|my plan|plan|proposed (?:change|fix|approach|plan|"
-    r"solution)|approach)\s*:?\s*$",
+    # One line only, and no two runs of spaces that could share the same characters: a
+    # "## Plan" line padded with 50,000 spaces must not make the match backtrack.
+    r"^\ufeff?[ \t]*#{1,6}[ \t]*(?:planned change|my plan|plan|proposed (?:change|fix|"
+    r"approach|plan|solution)|approach)[ \t]*(?::[ \t]*)?$",
     r"\bi(?:'ll| will) (?:add|update|write|rewrite|change|document|refactor|create|replace|"
     r"remove|move|rename|clarify|improve|extend)\b",
     r"\bi(?:'m| am) (?:currently |now )?working on (?:this|it|the issue)\b",
