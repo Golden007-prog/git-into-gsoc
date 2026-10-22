@@ -448,6 +448,8 @@ _NOT_CODE_REPO = re.compile(
     r"test-actions|sandbox|playground|demo|scratch)(?:$|[-_.])|^\.github$|^test-",
     re.I,
 )
+# Words an organization's name often carries after its own name ("Processing Foundation").
+_ORG_WORDS = frozenset({"foundation", "project", "org", "team", "community"})
 # A repository for a mentoring program's applications or ideas (gsoc, gsoc2026,
 # gsoc-2026-ideas, outreachy). Only as the first word: git-into-gsoc or a
 # foo-gsoc-tools library is code like any other.
@@ -471,9 +473,23 @@ _WEBSITE_REPO = re.compile(
 
 
 def is_not_code_repo(full_name: str) -> bool:
-    """True for a governance, GSoC application, test, or sandbox repository."""
-    name = str(full_name).split("/")[-1]
-    return bool(_NOT_CODE_REPO.search(name) or _PROGRAM_REPO.search(name))
+    """True for a governance, GSoC application, test, or sandbox repository.
+
+    A program word counts as the first word of the name (gsoc-ideas), or right after
+    the owner's own name (pharo-project/pharo-gsoc, processing/processing-gsoc-archive),
+    so anandkaranubc/git-into-gsoc stays code.
+    """
+    owner, _, name = str(full_name).rpartition("/")
+    if _NOT_CODE_REPO.search(name) or _PROGRAM_REPO.search(name):
+        return True
+    owned = {w for w in re.split(r"[-_.]", owner.lower()) if w}
+    words = [w for w in re.split(r"[-_.]", name.lower()) if w]
+    if not owned or not words or words[0] not in owned:
+        return False
+    rest = words[1:]
+    while rest and rest[0] in owned | _ORG_WORDS:
+        rest = rest[1:]
+    return bool(rest) and bool(_PROGRAM_REPO.search("-".join(rest)))
 
 
 def is_event_repo(full_name: str) -> bool:
@@ -489,7 +505,7 @@ def repo_kind(full_name: str) -> str | None:
     owner, _, name = str(full_name).rpartition("/")
     if owner and _flat(name) == _flat(owner):
         return None
-    if is_event_repo(name) or is_not_code_repo(name):
+    if is_event_repo(name) or is_not_code_repo(full_name):
         return "not code"
     if _PLUMBING_REPO.search(name):
         return "plumbing"

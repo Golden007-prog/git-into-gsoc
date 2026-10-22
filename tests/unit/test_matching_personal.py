@@ -417,9 +417,22 @@ def test_a_program_word_marks_an_application_repo_only_as_its_first_word() -> No
         "example/gsoc_ideas",
         "example/google-summer-of-code",
         "example/outreachy-2025",
+        # Right after the owner's own name: an organization's own GSoC repository.
+        "pharo-project/pharo-gsoc",
+        "ML4SCI/ML4SCI_GSoC",
+        "processing/Processing-Foundation-GSoC",
+        "processing/processing-gsoc-archive",
     ):
         assert is_not_code_repo(repo), repo
-    for repo in ("anandkaranubc/git-into-gsoc", "example/foo-gsoc-tools", "example/gsocial"):
+    for repo in (
+        "anandkaranubc/git-into-gsoc",
+        "example/foo-gsoc-tools",
+        "example/gsocial",
+        "example/project-gsoc-tools",
+        # A project built in a GSoC year is still code.
+        "RocketChat/CodeReviewAgent_GSoC2025",
+        "ga4gh/ga4gh_workflow_clinic_gsoc_2026",
+    ):
         assert not is_not_code_repo(repo), repo
     issue = {
         "repo": "anandkaranubc/git-into-gsoc",
