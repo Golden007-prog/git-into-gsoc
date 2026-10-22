@@ -70,7 +70,12 @@ from git_into_gsoc.github.repos import (
     pick_beginner_label,
     repo_lead_score,
 )
-from git_into_gsoc.github.search import RELATED_LANGUAGES, build_issue_query, or_group
+from git_into_gsoc.github.search import (
+    RELATED_LANGUAGES,
+    build_issue_query,
+    language_family,
+    or_group,
+)
 from git_into_gsoc.gitlab import gitlab_issue_status, parse_gitlab_issue
 from git_into_gsoc.gsoc.archive import ArchiveClient, proposal_folders, summarize_mentors
 from git_into_gsoc.gsoc.client import GSoCClient
@@ -87,7 +92,12 @@ from git_into_gsoc.http_client import CachedHttpClient, HttpError, NotFoundError
 from git_into_gsoc.matching.concepts import SKILL, kind_of
 from git_into_gsoc.matching.concepts import resolve as resolve_concept
 from git_into_gsoc.matching.ideas import ideas_for
-from git_into_gsoc.matching.issues import is_event_repo, personalize, starter_problem
+from git_into_gsoc.matching.issues import (
+    OLD_ISSUE_YEARS,
+    is_event_repo,
+    personalize,
+    starter_problem,
+)
 from git_into_gsoc.matching.path import learning_path
 from git_into_gsoc.matching.profile import (
     EXPERIENCE_HELP,
@@ -95,6 +105,7 @@ from git_into_gsoc.matching.profile import (
     ContributorProfile,
     build_profile,
     effective_experience,
+    languages_of,
 )
 from git_into_gsoc.matching.signals import load_signals, signals_for
 from git_into_gsoc.models import (
@@ -1228,28 +1239,64 @@ class GSoCToolkit:
         ]
         ideas = self._ideas_that_fit(taking_part[:3], person)
 
-        issue_language = techs[0] if techs else None
+        languages = languages_of(person)
+        issue_language = languages[0] if languages else (techs[0] if techs else None)
         issues: list[dict[str, Any]] = []
         issue_error: dict[str, str] | None = None
         issue_scope = None
         hidden = 0
         skipped = 0
-        owners = {o["github_orgs"][0]: o["name"] for o in taking_part if o.get("github_orgs")}
+        # Up to two GitHub owners for each of the first six organizations: projects
+        # often keep their beginner work in a second owner (a web app, a docs site).
+        owners: dict[str, str] = {}
+        for o in taking_part[:6]:
+            for gh in (o.get("github_orgs") or [])[:2]:
+                if len(owners) < 12:
+                    owners.setdefault(gh, o["name"])
+        sitting_out = {
+            owner.lower()
+            for o in orgs
+            if (o.get("participation") or {}).get("status") == "not_taking_part"
+            for owner in o.get("github_orgs") or []
+        }
+
+        def screen(candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int, int]:
+            """First tasks only: free, from nearby organizations still taking part, not an
+            announcement, a tracker, years old, in a retired repository, or out of profile."""
+            near = [
+                i
+                for i in candidates
+                if str(i["repo"]).split("/")[0].lower() not in sitting_out
+                and not is_event_repo(str(i["repo"]))
+                and (
+                    str(i["repo"]).split("/")[0].lower() in nearby_owners
+                    or i.get("gsoc_org") in nearby_names
+                )
+            ]
+            unique = list({(i["repo"], i["number"]): i for i in near}.values())
+            free = [i for i in unique if _open(i)]
+            good = [i for i in free if starter_problem(i, person) is None]
+            good = self._without_retired_repos(good, languages)
+            return good, len(unique) - len(free), len(free) - len(good)
+
         if issue_language or owners:
             try:
+                candidates: list[dict[str, Any]] = []
                 if owners:
                     found = self.github.find_beginner_issues(
-                        language=issue_language,
+                        language=languages or issue_language,
                         orgs=list(owners),
+                        # Not "help wanted": it mostly marks work too big for a first task.
+                        labels=list(_COMMON_BEGINNER_LABELS),
                         org_names={k.lower(): v for k, v in owners.items()},
-                        max_results=8,
+                        max_results=15,
+                        # Issues the starter screen would call too old never take a slot.
+                        created_after=f"{datetime.now(UTC).year - OLD_ISSUE_YEARS + 1}-01-01",
                     )
+                    candidates = [_issue_dict(i) for i in found]
                     issue_scope = "the recommended organizations above"
-                else:
-                    found = []
-                # A starter list should only hold issues someone can still pick up.
-                candidates = [_issue_dict(i) for i in found]
-                if len([i for i in candidates if _open(i)]) < 3 and issue_language:
+                screened, hidden, skipped = screen(candidates)
+                if len(screened) < 3 and issue_language:
                     broad = self.find_issues(language=issue_language, max_results=5)
                     candidates += broad["issues"]
                     issue_scope = (
@@ -1257,34 +1304,19 @@ class GSoCToolkit:
                         if issue_scope
                         else f"GSoC organizations that use {issue_language}"
                     )
-                # Not from an organization that said it sits out, even through the
-                # wider language search.
-                sitting_out = {
-                    owner.lower()
-                    for o in orgs
-                    if (o.get("participation") or {}).get("status") == "not_taking_part"
-                    for owner in o.get("github_orgs") or []
-                }
-                # Nor from a repository for an event rather than code, nor from an
-                # organization far down this person's ranking.
-                candidates = [
-                    i
-                    for i in candidates
-                    if str(i["repo"]).split("/")[0].lower() not in sitting_out
-                    and not is_event_repo(str(i["repo"]))
-                    and (
-                        str(i["repo"]).split("/")[0].lower() in nearby_owners
-                        or i.get("gsoc_org") in nearby_names
-                    )
-                ]
-                unique = list({(i["repo"], i["number"]): i for i in candidates}.values())
-                hidden = sum(1 for i in unique if not _open(i))
-                free = [i for i in unique if _open(i)]
-                # A first task, not an announcement, a tracker, a years-old request, or
-                # work in a language the person does not know.
-                screened = [i for i in free if starter_problem(i, person) is None]
-                screened = self._without_retired_repos(screened)
-                skipped = len(free) - len(screened)
+                    screened, hidden, skipped = screen(candidates)
+                if len(screened) < 2 and self.settings.resolve_github_token():
+                    # Each of the two best organizations on its own, with the projects its
+                    # ideas page names and the beginner labels it really uses.
+                    for o in taking_part[:2]:
+                        try:
+                            own = self.find_issues(
+                                org=o["name"], language=issue_language, max_results=4
+                            )
+                        except GigError:
+                            continue
+                        candidates += own["issues"]
+                    screened, hidden, skipped = screen(candidates)
                 issues = personalize(screened, person)[:5]
             except GigError as exc:
                 issue_error = exc.to_dict()
@@ -1339,10 +1371,14 @@ class GSoCToolkit:
             "evidence_note": note,
         }
 
-    def _without_retired_repos(self, issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Leave out issues in repositories that are retired or have gone quiet for a year."""
+    def _without_retired_repos(
+        self, issues: list[dict[str, Any]], languages: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Leave out issues in repositories that are retired or have gone quiet for a year,
+        and, given the person's languages, in repositories mostly written in another one."""
         keep = []
         verdicts: dict[str, bool] = {}
+        wanted = {canonical(x) for x in language_family(languages or [])}
         for issue in issues:
             repo = str(issue.get("repo") or "")
             if repo not in verdicts:
@@ -1351,7 +1387,9 @@ class GSoCToolkit:
                 except (GigError, ValueError):
                     verdicts[repo] = True
                 else:
-                    verdicts[repo] = not (_retired_repo(raw) or _dormant_days(raw))
+                    main = canonical(str(raw.get("language") or ""))
+                    off_language = bool(wanted) and bool(main) and main not in wanted
+                    verdicts[repo] = not (_retired_repo(raw) or _dormant_days(raw) or off_language)
             if verdicts[repo]:
                 keep.append(issue)
         return keep

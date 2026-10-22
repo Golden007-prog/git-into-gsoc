@@ -377,3 +377,91 @@ def test_the_path_never_says_learn_the_organizations_own_product() -> None:
     steps = [s["step"] for s in learning_path(build_profile(technologies=["c++"]), orgs, fitting)]
     assert any(s.startswith("Learn Python") for s in steps)
     assert not any(s.startswith("Learn Blender") for s in steps)
+
+
+def test_governance_test_and_reserved_issues_are_not_first_tasks() -> None:
+    from git_into_gsoc.matching.issues import is_not_code_repo, starter_problem
+
+    for repo in (
+        "webpack/tsc",
+        "webpack/working-groups",
+        "learningequality/test-actions",
+        "zulip/.github",
+    ):
+        assert is_not_code_repo(repo), repo
+    assert not is_not_code_repo("sympy/sympy")
+    person = build_profile(technologies=["rust"])
+    reserved = {
+        "repo": "boa-dev/boa",
+        "title": "Audit the string handling",
+        "body_excerpt": "This issue is reserved for GSoC candidates.",
+        "created_at": "2026-01-01",
+    }
+    assert starter_problem(reserved, person) == "reserved for someone or already being worked on"
+
+
+def test_help_wanted_alone_medium_and_unsettled_issues_are_not_first_tasks() -> None:
+    from git_into_gsoc.matching.issues import starter_problem
+
+    person = build_profile(technologies=["rust"])
+
+    def issue(*labels: str, title: str = "Fix the parser") -> dict[str, object]:
+        return {"title": title, "labels": list(labels), "created_at": "2026-01-01"}
+
+    assert "no beginner label" in str(starter_problem(issue("Help Wanted", "A-API"), person))
+    assert starter_problem(issue("good first issue", "E-Medium"), person)
+    assert starter_problem(issue("good first issue", "status: needs discussion"), person)
+    calls = issue("good first issue", title="Find bugs in the rewrite of the assumption system")
+    assert "call for testing" in str(starter_problem(calls, person))
+    # A beginner label beside "help wanted" is fine, and so is a medium priority.
+    assert starter_problem(issue("good first issue", "help wanted"), person) is None
+    assert starter_problem(issue("Easy to Fix", "priority: medium"), person) is None
+
+
+def test_issues_others_asked_for_stay_off_the_starter_list() -> None:
+    from git_into_gsoc.matching.issues import starter_problem
+
+    person = build_profile(technologies=["python"])
+
+    def asked(*claims: dict[str, object]) -> dict[str, object]:
+        return {
+            "title": "Fix the parser",
+            "labels": ["good first issue"],
+            "created_at": "2026-01-01",
+            "author": "opener",
+            "assessment": {"claims": list(claims)},
+        }
+
+    # Three people over two years: crowded, though each claim is old.
+    crowded = asked(
+        {"login": "a", "days_ago": 240}, {"login": "b", "days_ago": 340}, {"login": "c"}
+    )
+    assert starter_problem(crowded, person) == "3 people have asked to work on it"
+    # The author said "I'm working on this" 73 days ago: stale for `issue`, still theirs.
+    mine = asked({"login": "Opener", "days_ago": 73})
+    assert starter_problem(mine, person) == "its author said they are working on it"
+    granted = asked({"login": "a", "days_ago": 128, "granted": True})
+    assert "a maintainer gave it to someone" in str(starter_problem(granted, person))
+    # One ask from someone else 56 days ago, never approved: still a fair first task.
+    assert starter_problem(asked({"login": "a", "days_ago": 56}), person) is None
+    assert starter_problem(asked(), person) is None
+
+
+def test_go_as_an_english_verb_is_not_the_language() -> None:
+    from git_into_gsoc.matching.concepts import find_concepts
+
+    assert "go" not in find_concepts("3. Go to profile screen. Go back and tap again.")
+    assert "go" in find_concepts("Port the CLI to Go. Go is fast.")
+
+
+def test_an_android_app_issue_suits_someone_who_knows_kotlin() -> None:
+    from git_into_gsoc.matching.issues import starter_problem
+
+    crash = {
+        "title": "App crashes when tapping on a card in landscape mode",
+        "body_excerpt": "Steps: 1. Open the app 2. Go to profile screen. Android Version: 16",
+        "labels": ["bug", "good first issue"],
+        "created_at": "2026-05-01",
+    }
+    assert starter_problem(crash, build_profile(technologies=["kotlin"])) is None
+    assert starter_problem(crash, build_profile(technologies=["haskell"]))
