@@ -1014,3 +1014,21 @@ def test_a_fix_merged_before_the_issue_was_opened_does_not_count() -> None:
     found = assess_issue(issue, [old], now=NOW)
     assert found.availability == Availability.AVAILABLE
     assert not any(p.fixes for p in found.linked_prs)
+
+
+def test_a_comment_with_a_plan_is_a_claim() -> None:
+    # This project's good-first issues ask people to "comment with what you plan to do";
+    # a comment doing exactly that read as no claim (launch audit, 0.23.0). Paraphrased:
+    plan = (
+        "﻿## Planned change\n\nThe guide uses four terms without explaining them. "
+        "I will add one plain-language sentence at the first use of each:\n\n- **trailer**"
+    )
+    assert is_claim(plan)
+    assert is_claim("## My plan\n\nKeep the fix to one file.")
+    assert is_claim("I'll remove the `-Werror` flag and add a test.")
+    assert is_claim("I will replace strict string matching with a parser.")
+    # A plan someone else wrote, quoted, or a question, is not.
+    assert not is_claim("> I will add a check\n\nWho wrote this?")
+    assert not is_claim("Will you add a changelog entry?")
+    timeline = [_comment("dana", plan, 2)]
+    assert assess_issue(_issue(), timeline, now=NOW).availability == Availability.CLAIMED
