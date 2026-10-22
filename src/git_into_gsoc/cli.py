@@ -2115,6 +2115,23 @@ def setup_cmd(
             output,
         )
         return
+    copied = [
+        c
+        for c in plan.changes
+        if c.kind == "skill" and c.action in {"created", "updated", "unchanged"}
+    ]
+    if not plan.assistants and not (dry_run or remove) and not plan.manual and copied:
+        # A blind beginner install (2026-10-22) read a yellow "No AI assistant detected",
+        # a table of skill folders, and an "MCP command" line as errors. With no
+        # assistant there is nothing to connect, so say only what happened.
+        where = _short_path(copied[0].path, plan.home, plan.project)
+        console.print(
+            f"No AI assistant was found, so only the skill was copied to {where}. That is fine: "
+            "every feature works in the terminal. Try [cyan]git-into-gsoc start[/cyan]. If you "
+            "use an assistant this did not find, name it, for example "
+            "[cyan]git-into-gsoc setup --assistant claude-code[/cyan]."
+        )
+        return
     if not plan.assistants:
         console.print(
             "[yellow]No AI assistant detected.[/yellow] Use --assistant to pick one, "
@@ -2273,7 +2290,12 @@ def doctor_cmd() -> None:
                     "(run `git-into-gsoc setup` to point it at this installation)"
                 )
     elif not plugins:
-        console.print("MCP registered in: [yellow]nowhere yet[/yellow] (run `git-into-gsoc setup`)")
+        # Yellow "nowhere yet" reads as an error to someone who only uses the terminal,
+        # the same pattern a blind beginner install flagged in `setup` (2026-10-22).
+        console.print(
+            "AI assistants connected: none yet. That is fine in a terminal; if you use "
+            "one, run `git-into-gsoc setup`."
+        )
 
 
 def _command_problem(entry: dict[str, object]) -> str | None:
